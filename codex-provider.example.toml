@@ -1,0 +1,9 @@
+# 这段内容由“配置Codex.bat”安全写入用户级 config.toml。
+model = "codex-chat"
+model_provider = "local-chat-gateway"
+
+[model_providers.local-chat-gateway]
+name = "Local Chat-to-Responses Gateway"
+base_url = "http://127.0.0.1:4000/v1"
+wire_api = "responses"
+

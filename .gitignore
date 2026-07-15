@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+logs/
+.gateway/
+.portable-build/
+dist-portable/
+dist/
+runtime/

@@ -1,0 +1,2 @@
+litellm[proxy] @ https://github.com/BerriAI/litellm/archive/dfe91303a72792bce0c790ab8615b779c1c4730a.zip
+tomlkit==0.13.3
