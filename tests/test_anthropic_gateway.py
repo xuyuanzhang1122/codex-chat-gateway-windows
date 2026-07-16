@@ -14,10 +14,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def free_port() -> int:
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
+def free_ports(count: int) -> list[int]:
+    listeners: list[socket.socket] = []
+    try:
+        for _ in range(count):
+            listener = socket.socket()
+            listener.bind(("127.0.0.1", 0))
+            listeners.append(listener)
+        return [int(listener.getsockname()[1]) for listener in listeners]
+    finally:
+        for listener in listeners:
+            listener.close()
 
 
 def request(url: str, payload: dict[str, object] | None = None) -> bytes:
@@ -34,21 +41,37 @@ def request(url: str, payload: dict[str, object] | None = None) -> bytes:
         return response.read()
 
 
-def wait_for_gateway(base: str) -> dict[str, object]:
-    deadline = time.monotonic() + 45
+def exited_process_error(name: str, process: subprocess.Popen[str]) -> str | None:
+    return_code = process.poll()
+    if return_code is None:
+        return None
+    stderr = process.stderr.read().strip() if process.stderr is not None else ""
+    return f"{name} exited with code {return_code}: {stderr[-4000:]}"
+
+
+def wait_for_gateway(
+    base: str, gateway: subprocess.Popen[str], upstream: subprocess.Popen[str]
+) -> dict[str, object]:
+    deadline = time.monotonic() + 120
     last_error: Exception | None = None
     while time.monotonic() < deadline:
+        for name, process in (("gateway", gateway), ("mock upstream", upstream)):
+            process_error = exited_process_error(name, process)
+            if process_error is not None:
+                raise RuntimeError(process_error)
         try:
             return json.loads(request(f"{base}/v1/models"))
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             last_error = exc
             time.sleep(0.25)
-    raise RuntimeError(f"Gateway did not become ready: {last_error}")
+    raise RuntimeError(
+        f"Gateway did not become ready after 120 seconds: {last_error}; "
+        f"gateway_running={gateway.poll() is None}; upstream_running={upstream.poll() is None}"
+    )
 
 
 def main() -> None:
-    upstream_port = free_port()
-    gateway_port = free_port()
+    upstream_port, gateway_port = free_ports(2)
     env = os.environ.copy()
     env.update(
         {
@@ -66,6 +89,9 @@ def main() -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         creationflags=startup,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     gateway = subprocess.Popen(
         [
@@ -83,10 +109,13 @@ def main() -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         creationflags=startup,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     try:
         base = f"http://127.0.0.1:{gateway_port}"
-        models = wait_for_gateway(base)
+        models = wait_for_gateway(base, gateway, upstream)
         ids = {item["id"] for item in models["data"]}
         required = {"codex-chat", "claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"}
         assert required <= ids
