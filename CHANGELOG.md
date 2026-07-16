@@ -1,5 +1,12 @@
 # 更新记录
 
+## 1.2.0
+
+- 新增 Claude Desktop 内嵌 Code 模式的 3P Profile 配置入口，不修改普通聊天或 MCP 配置。
+- 同一个默认模型同时提供 Codex 与 Claude Desktop 的 Sonnet/Opus/Haiku 兼容路由。
+- 新增一键恢复 Claude Desktop 官方 1P 模式，保留其他 Profile 和无关字段。
+- 增加 Claude Desktop 配置回归测试，并纳入便携包 CI 构建。
+
 ## 1.1.1
 
 - 新增一键恢复 Codex 官方配置，保留 MCP、插件和无关设置。

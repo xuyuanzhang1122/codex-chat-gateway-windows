@@ -64,10 +64,11 @@ $rootFiles = @(
     '.gitignore', 'AGENTS.md', 'README.md', 'CHANGELOG.md', 'LICENSE',
     'THIRD_PARTY_NOTICES.md', 'VERSION',
     'config.yaml', 'run_gateway.py',
-    'check-gateway.bat', 'configure-codex.bat', 'disable-autostart.bat',
+    'check-gateway.bat', 'configure-claude-desktop.bat', 'configure-codex.bat', 'disable-autostart.bat',
     'enable-autostart.bat', 'gateway-status.bat', 'model-config.bat',
-    'restore-official-codex.bat', 'start-gateway.bat', 'stop-gateway.bat',
-    '检查网关.bat', '模型配置.bat', '配置Codex.bat', '恢复Codex官方配置.bat',
+    'restore-official-claude-desktop.bat', 'restore-official-codex.bat', 'start-gateway.bat', 'stop-gateway.bat',
+    '检查网关.bat', '模型配置.bat', '配置Claude Desktop Code模式.bat', '配置Codex.bat',
+    '恢复Claude Desktop官方配置.bat', '恢复Codex官方配置.bat',
     '启动网关.bat', '停止网关.bat', '网关状态.bat'
 )
 foreach ($name in $rootFiles) {
@@ -75,9 +76,10 @@ foreach ($name in $rootFiles) {
 }
 
 $releaseScripts = @(
-    'check.ps1', 'configure_codex.py', 'configure-codex.ps1',
+    'check.ps1', 'claude_desktop_config.py', 'configure-claude-desktop.ps1',
+    'configure_codex.py', 'configure-codex.ps1',
     'disable-autostart.ps1', 'enable-autostart.ps1', 'model-manager.ps1',
-    'model-store.ps1', 'restore_codex.py', 'restore-codex.ps1',
+    'model-store.ps1', 'restore-claude-desktop.ps1', 'restore_codex.py', 'restore-codex.ps1',
     'start-background.ps1', 'status.ps1', 'stop-background.ps1'
 )
 $stageScripts = Join-Path $stage 'scripts'
@@ -92,6 +94,10 @@ $portablePython = Join-Path $runtime 'python.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Tool adjacency regression test failed.' }
 & $portablePython (Join-Path $projectRoot 'tests\test_codex_restore.py')
 if ($LASTEXITCODE -ne 0) { throw 'Codex restore regression test failed.' }
+& $portablePython (Join-Path $projectRoot 'tests\test_claude_desktop_config.py')
+if ($LASTEXITCODE -ne 0) { throw 'Claude Desktop config regression test failed.' }
+& $portablePython (Join-Path $projectRoot 'tests\test_anthropic_gateway.py')
+if ($LASTEXITCODE -ne 0) { throw 'Anthropic gateway regression test failed.' }
 
 foreach ($file in Get-ChildItem -LiteralPath $stageScripts -Filter '*.ps1') {
     [void][scriptblock]::Create((Get-Content -LiteralPath $file.FullName -Raw))
