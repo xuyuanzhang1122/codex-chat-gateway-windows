@@ -5,6 +5,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -41,22 +42,35 @@ def request(url: str, payload: dict[str, object] | None = None) -> bytes:
         return response.read()
 
 
-def exited_process_error(name: str, process: subprocess.Popen[str]) -> str | None:
+def log_tail(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[-4000:].strip()
+    except OSError as exc:
+        return f"Could not read {path}: {exc}"
+
+
+def exited_process_error(name: str, process: subprocess.Popen[str], log_path: Path) -> str | None:
     return_code = process.poll()
     if return_code is None:
         return None
-    stderr = process.stderr.read().strip() if process.stderr is not None else ""
-    return f"{name} exited with code {return_code}: {stderr[-4000:]}"
+    return f"{name} exited with code {return_code}: {log_tail(log_path)}"
 
 
 def wait_for_gateway(
-    base: str, gateway: subprocess.Popen[str], upstream: subprocess.Popen[str]
+    base: str,
+    gateway: subprocess.Popen[str],
+    upstream: subprocess.Popen[str],
+    gateway_log_path: Path,
+    upstream_log_path: Path,
 ) -> dict[str, object]:
     deadline = time.monotonic() + 120
     last_error: Exception | None = None
     while time.monotonic() < deadline:
-        for name, process in (("gateway", gateway), ("mock upstream", upstream)):
-            process_error = exited_process_error(name, process)
+        for name, process, log_path in (
+            ("gateway", gateway, gateway_log_path),
+            ("mock upstream", upstream, upstream_log_path),
+        ):
+            process_error = exited_process_error(name, process, log_path)
             if process_error is not None:
                 raise RuntimeError(process_error)
         try:
@@ -66,7 +80,8 @@ def wait_for_gateway(
             time.sleep(0.25)
     raise RuntimeError(
         f"Gateway did not become ready after 120 seconds: {last_error}; "
-        f"gateway_running={gateway.poll() is None}; upstream_running={upstream.poll() is None}"
+        f"gateway_running={gateway.poll() is None}; upstream_running={upstream.poll() is None}; "
+        f"gateway_log={log_tail(gateway_log_path)}; upstream_log={log_tail(upstream_log_path)}"
     )
 
 
@@ -82,16 +97,19 @@ def main() -> None:
         }
     )
     startup = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    temp_directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+    log_root = Path(temp_directory.name)
+    upstream_log_path = log_root / "upstream.stderr.log"
+    gateway_log_path = log_root / "gateway.stderr.log"
+    upstream_log = upstream_log_path.open("w", encoding="utf-8", errors="replace")
+    gateway_log = gateway_log_path.open("w", encoding="utf-8", errors="replace")
     upstream = subprocess.Popen(
         [sys.executable, str(ROOT / "tests" / "mock_chat_upstream.py"), "--port", str(upstream_port)],
         cwd=ROOT,
         env=env,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stderr=upstream_log,
         creationflags=startup,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
     )
     gateway = subprocess.Popen(
         [
@@ -107,15 +125,12 @@ def main() -> None:
         cwd=ROOT,
         env=env,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stderr=gateway_log,
         creationflags=startup,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
     )
     try:
         base = f"http://127.0.0.1:{gateway_port}"
-        models = wait_for_gateway(base, gateway, upstream)
+        models = wait_for_gateway(base, gateway, upstream, gateway_log_path, upstream_log_path)
         ids = {item["id"] for item in models["data"]}
         required = {"codex-chat", "claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"}
         assert required <= ids
@@ -179,6 +194,9 @@ def main() -> None:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+        gateway_log.close()
+        upstream_log.close()
+        temp_directory.cleanup()
 
 
 if __name__ == "__main__":
