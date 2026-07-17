@@ -12,7 +12,8 @@ permissions:
 
 jobs:
   build-windows-x64:
-    runs-on: windows-latest
+    # Windows Server 2022 includes Inno Setup; the 2025 image removed it.
+    runs-on: windows-2022
     timeout-minutes: 30
 
     steps:
@@ -38,6 +39,12 @@ jobs:
         shell: pwsh
         run: ./scripts/build-portable.ps1
 
+      - name: Build branded EXE installer
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          ./scripts/build-installer.ps1 -PayloadDirectory "dist/codex-chat-gateway-portable-v$version"
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
         with:
@@ -45,6 +52,8 @@ jobs:
           path: |
             dist/*.7z
             dist/*.sha256
+            dist-installer/*.exe
+            dist-installer/*.sha256
           if-no-files-found: error
 
       - name: Publish GitHub Release
@@ -54,7 +63,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ github.ref_name }}"
-          $files = @(Get-ChildItem dist -File | Where-Object { $_.Extension -eq '.7z' -or $_.Name -like '*.sha256' } | ForEach-Object FullName)
+          $files = @(Get-ChildItem dist, dist-installer -File | Where-Object { $_.Extension -in @('.7z', '.exe') -or $_.Name -like '*.sha256' } | ForEach-Object FullName)
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @files --clobber

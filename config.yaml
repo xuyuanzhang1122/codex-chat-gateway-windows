@@ -5,6 +5,21 @@ model_list:
       api_base: os.environ/UPSTREAM_BASE_URL
       api_key: os.environ/UPSTREAM_API_KEY
       use_chat_completions_api: true
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: os.environ/CLAUDE_UPSTREAM_MODEL
+      api_base: os.environ/UPSTREAM_BASE_URL
+      api_key: os.environ/UPSTREAM_API_KEY
+  - model_name: claude-opus-4-8
+    litellm_params:
+      model: os.environ/CLAUDE_UPSTREAM_MODEL
+      api_base: os.environ/UPSTREAM_BASE_URL
+      api_key: os.environ/UPSTREAM_API_KEY
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: os.environ/CLAUDE_UPSTREAM_MODEL
+      api_base: os.environ/UPSTREAM_BASE_URL
+      api_key: os.environ/UPSTREAM_API_KEY
 
 litellm_settings:
   drop_params: true

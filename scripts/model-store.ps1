@@ -37,6 +37,12 @@ function Get-LiteLLMModelName {
     return "openai/$ModelId"
 }
 
+function Get-ClaudeLiteLLMModelName {
+    param([string]$LiteLLMModel)
+    if ($LiteLLMModel -match '^openai/(.+)$') { return "custom_openai/$($matches[1])" }
+    return $LiteLLMModel
+}
+
 function Import-LegacyEnvironment {
     param([string]$ProjectRoot)
     $storePath = Get-ModelStorePath $ProjectRoot
@@ -71,6 +77,7 @@ function Set-DefaultModelEnvironment {
     $profile = @($store.profiles | Where-Object { $_.id -eq $store.default_id }) | Select-Object -First 1
     if (-not $profile) { throw 'No default model is configured. Run model-config.bat first.' }
     $env:UPSTREAM_MODEL = [string]$profile.litellm_model
+    $env:CLAUDE_UPSTREAM_MODEL = Get-ClaudeLiteLLMModelName -LiteLLMModel ([string]$profile.litellm_model)
     $env:UPSTREAM_BASE_URL = [string]$profile.base_url
     $env:UPSTREAM_API_KEY = [string]$profile.api_key
     $env:GATEWAY_HOST = '127.0.0.1'

@@ -7,4 +7,8 @@ logs/
 .portable-build/
 dist-portable/
 dist/
+dist-installer/
 runtime/
+CodexChatGateway.exe
+desktop/*.exe
+desktop/assets/*-chroma.png
