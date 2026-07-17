@@ -88,8 +88,10 @@ def wait_for_gateway(
 def main() -> None:
     upstream_port, gateway_port = free_ports(2)
     env = os.environ.copy()
+    env.pop("PYTHONUTF8", None)
     env.update(
         {
+            "PYTHONIOENCODING": "cp1252",
             "UPSTREAM_MODEL": "openai/mock-model",
             "CLAUDE_UPSTREAM_MODEL": "custom_openai/mock-model",
             "UPSTREAM_BASE_URL": f"http://127.0.0.1:{upstream_port}/v1",

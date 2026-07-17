@@ -1,3 +1,5 @@
+param([switch]$NonInteractive)
+
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'model-store.ps1')
@@ -6,6 +8,10 @@ try {
     $profile = Set-DefaultModelEnvironment -ProjectRoot $projectRoot
 } catch {
     Write-Host $_.Exception.Message
+    if ($NonInteractive) {
+        Write-Host 'Configure a default model in the desktop console before starting the gateway.'
+        exit 2
+    }
     & (Join-Path $PSScriptRoot 'model-manager.ps1')
     $profile = Set-DefaultModelEnvironment -ProjectRoot $projectRoot
 }

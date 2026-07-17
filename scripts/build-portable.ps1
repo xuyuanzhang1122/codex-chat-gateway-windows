@@ -32,6 +32,9 @@ foreach ($path in @($archive, $shaFile)) {
 }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
+& (Join-Path $PSScriptRoot 'build-desktop.ps1') -OutputPath (Join-Path $stage 'CodexChatGateway.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Desktop application build failed.' }
+
 $buildCache = Join-Path $projectRoot '.portable-build'
 $pythonArchive = Join-Path $buildCache 'python-3.11.9-embed-amd64.zip'
 New-Item -ItemType Directory -Path $buildCache -Force | Out-Null
@@ -68,7 +71,7 @@ $rootFiles = @(
     'enable-autostart.bat', 'gateway-status.bat', 'model-config.bat',
     'restore-official-claude-desktop.bat', 'restore-official-codex.bat', 'start-gateway.bat', 'stop-gateway.bat',
     '检查网关.bat', '模型配置.bat', '配置Claude Desktop Code模式.bat', '配置Codex.bat',
-    '恢复Claude Desktop官方配置.bat', '恢复Codex官方配置.bat',
+    '恢复Claude Desktop官方配置.bat', '恢复Codex官方配置.bat', 'desktop.bat', '桌面版.bat',
     '启动网关.bat', '停止网关.bat', '网关状态.bat'
 )
 foreach ($name in $rootFiles) {

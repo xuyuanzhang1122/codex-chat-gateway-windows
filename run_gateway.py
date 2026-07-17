@@ -1,6 +1,16 @@
-from litellm import run_server
+from __future__ import annotations
+
+import sys
+
+
+def configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
 if __name__ == "__main__":
-    run_server()
+    configure_utf8_stdio()
+    from litellm import run_server
 
+    run_server()

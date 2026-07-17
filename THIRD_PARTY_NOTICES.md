@@ -1,5 +1,11 @@
 # Third-party notices
 
+## Inno Setup Simplified Chinese translation
+
+- Project: https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation
+- File: `installer/ChineseSimplified.isl`
+- License: MIT; the complete text is stored at `installer/CHINESE_TRANSLATION_LICENSE.txt`.
+
 ## LiteLLM
 
 - Project: https://github.com/BerriAI/litellm
