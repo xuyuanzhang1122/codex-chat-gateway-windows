@@ -11,6 +11,14 @@
 
 Responses API 不只是字段改名，还涉及 SSE 流式事件、工具调用、错误映射、参数兼容和多轮上下文。本项目直接复用 LiteLLM，只负责 Windows 一键安装、密钥隔离、Codex TOML 安全写入和健康检查。
 
+## 下载与安装
+
+普通用户请前往 [GitHub Releases](https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/latest) 下载最新版：
+
+- `CodexChatGateway-Setup-vX.Y.Z.exe`：推荐，品牌化图形安装程序。
+- `codex-chat-gateway-portable-vX.Y.Z-windows-x64.7z`：免安装便携版。
+- 同名 `.sha256`：用于校验下载文件完整性。
+
 ## 便携分发版：空白 Windows 直接使用
 
 便携版目录中包含 `runtime/python.exe` 和全部已验证依赖，不要求目标电脑安装 Python、Docker、Git、Codex CLI 或联网下载运行库。目标系统为 Windows x64，并需要能够访问上游模型 API。
@@ -74,16 +82,17 @@ DeepSeek URL 自动使用 `deepseek/模型名` 适配器，其他 OpenAI 兼容 
 
 ## CI/CD 与发布
 
-GitHub Actions 会在 Windows x64 环境中完成完整构建：下载并校验官方 CPython 3.11.9 嵌入式运行时、安装锁定到提交哈希的 LiteLLM 上游修复、运行回归测试、用 7-Zip 打包并生成 SHA-256。
+GitHub Actions 会在 Windows x64 环境中完成完整构建：下载并校验官方 CPython 3.11.9 嵌入式运行时、安装锁定到提交哈希的 LiteLLM 上游修复、运行回归测试、生成 7-Zip 便携包和品牌化 Inno Setup 安装程序，并为两种成品生成 SHA-256。
 
 - 推送到 `main` 或创建 Pull Request：构建并上传 Actions Artifact，不创建 Release。
 - 手动运行工作流：生成可下载的测试构建。
-- 推送与 `VERSION` 一致的标签，例如 `v1.1.1`：自动创建或更新 GitHub Release，并上传 `.7z` 与 `.sha256`。
+- 推送与 `VERSION` 一致的标签，例如 `v1.2.0`：自动创建或更新 GitHub Release，并上传安装版 `.exe`、便携版 `.7z` 与对应的 `.sha256`。
 
 本地执行同一构建流程：
 
 ```powershell
 .\scripts\build-portable.ps1
+.\scripts\build-installer.ps1
 ```
 
 贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
