@@ -1,11 +1,50 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ActionIcon,
+  Alert,
+  Block,
+  Button,
+  Empty,
+  Flexbox,
+  Form,
+  FormItem,
+  Icon,
+  Input,
+  InputPassword,
+  Modal,
+  SearchBar,
+  SideNav,
+  Snippet,
+  Tag,
+  Text,
+  Tooltip,
+} from "@lobehub/ui";
+import {
+  Activity,
+  Bot,
+  CheckCircle2,
+  Copy,
+  ExternalLink,
+  FolderOpen,
+  Layers3,
+  Pencil,
+  Play,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Server,
+  Settings2,
+  Square,
+  Star,
+  Trash2,
+  Users,
+} from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
-import { ask, message } from "@tauri-apps/plugin-dialog";
+import { ask, message as dialogMessage } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { TitleBar } from "./TitleBar";
-import { IconActivity, IconClients, IconGateway, IconModels } from "./icons";
 import type {
-  ActionResult,
   GatewayStatus,
   LogLevel,
   LogLine,
@@ -18,6 +57,7 @@ import type {
 type Page = "gateway" | "models" | "clients" | "activity";
 
 const emptyStatus: GatewayStatus = {
+  phase: "stopped",
   running: false,
   healthy: false,
   is_our_gateway: false,
@@ -29,28 +69,13 @@ const emptyStatus: GatewayStatus = {
   default_model_name: null,
   message: "检测中…",
   routes: [],
+  busy: false,
 };
 
-function copyText(text: string): boolean {
-  try {
-    void navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    try {
-      const el = document.createElement("textarea");
-      el.value = text;
-      document.body.appendChild(el);
-      el.select();
-      const ok = document.execCommand("copy");
-      document.body.removeChild(el);
-      return ok;
-    } catch {
-      return false;
-    }
-  }
-}
+const GITHUB = "https://github.com/xuyuanzhang1122/codex-chat-gateway-windows";
+const LOBE_UI = "https://ui.lobehub.com";
 
-export default function App() {
+function App() {
   const [splash, setSplash] = useState(true);
   const [splashExit, setSplashExit] = useState(false);
   const [page, setPage] = useState<Page>("gateway");
@@ -58,10 +83,8 @@ export default function App() {
   const [store, setStore] = useState<ModelStore>({ version: 1, default_id: "", profiles: [] });
   const [info, setInfo] = useState<ProjectInfo | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<LogLine[]>([]);
-  const logSeq = useRef(0);
-  const logRef = useRef<HTMLDivElement | null>(null);
+  const logId = useRef(0);
   const [dialog, setDialog] = useState<null | { mode: "add" | "edit"; profile?: ModelProfile }>(
     null,
   );
@@ -70,127 +93,65 @@ export default function App() {
   const pushLog = useCallback((level: LogLevel, msg: string) => {
     if (!msg) return;
     setLogs((prev) => {
-      const next = [...prev, { id: ++logSeq.current, level, message: msg }];
-      return next.length > 300 ? next.slice(-300) : next;
+      const next = [...prev, { id: ++logId.current, level, message: msg }];
+      return next.length > 250 ? next.slice(-250) : next;
     });
   }, []);
 
-  useEffect(() => {
-    if (page === "activity") {
-      logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
-    }
-  }, [logs, page]);
-
-  const loadAll = useCallback(async () => {
-    const [st, models, proj] = await Promise.all([
-      api.status(),
-      api.listModels(),
-      api.projectInfo(),
-    ]);
-    setStatus(st);
-    setStore(models);
-    setInfo(proj);
-  }, []);
-
-  // Light status poll only (no full store refresh) — major perf win
+  // Event-driven backend (no heavy polling loop)
   useEffect(() => {
     if (!ready) return;
-    let cancelled = false;
-    let timer = 0;
-
-    const tick = async () => {
-      try {
-        const st = await api.status();
-        if (!cancelled) setStatus(st);
-      } catch {
-        /* ignore transient */
-      }
-      if (!cancelled) timer = window.setTimeout(tick, 5000);
-    };
+    let unsubs: Array<() => void> = [];
 
     void (async () => {
       try {
-        await loadAll();
-        pushLog("INFO", "Studio 控制台已就绪");
-        const proj = await api.projectInfo();
+        const [st, models, proj] = await Promise.all([
+          api.status(),
+          api.listModels(),
+          api.projectInfo(),
+        ]);
+        setStatus(st);
+        setStore(models);
+        setInfo(proj);
+        pushLog("INFO", "Studio 已就绪（事件驱动后端）");
         pushLog("DIM", proj.root);
       } catch (e) {
         pushLog("ERR", `初始化失败: ${String(e)}`);
       }
-      if (!cancelled) timer = window.setTimeout(tick, 5000);
+
+      const u1 = await listen<GatewayStatus>("gateway://status", (e) => {
+        setStatus(e.payload);
+      });
+      const u2 = await listen<{ level: string; message: string }>("gateway://log", (e) => {
+        const lv = (e.payload.level || "DIM").toUpperCase() as LogLevel;
+        pushLog(
+          lv === "OK" || lv === "ERR" || lv === "INFO" || lv === "DIM" ? lv : "DIM",
+          e.payload.message,
+        );
+      });
+      const u3 = await listen<{ ok: boolean; message: string }>("gateway://action", (e) => {
+        // status already streamed; keep models warm after start
+        if (e.payload.ok) {
+          void api.listModels().then(setStore).catch(() => undefined);
+          void api.projectInfo().then(setInfo).catch(() => undefined);
+        }
+      });
+      unsubs = [u1, u2, u3];
     })();
 
     return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
+      for (const u of unsubs) u();
     };
-  }, [ready, loadAll, pushLog]);
+  }, [ready, pushLog]);
 
   const enter = () => {
     setSplashExit(true);
-    window.setTimeout(() => setSplash(false), 420);
-  };
-
-  const applyResult = (label: string, result: ActionResult) => {
-    for (const line of result.logs) pushLog(result.ok ? "DIM" : "ERR", line);
-    pushLog(
-      result.ok ? "OK" : "ERR",
-      result.ok ? `${label} 完成` : `${label} 失败 · ${result.message}`,
-    );
-    setStatus(result.status);
-  };
-
-  const run = async (label: string, fn: () => Promise<ActionResult | void>) => {
-    if (busy) return;
-    setBusy(true);
-    pushLog("INFO", `▶ ${label}`);
-    try {
-      const result = await fn();
-      if (result) applyResult(label, result);
-      const models = await api.listModels();
-      setStore(models);
-      const st = await api.status();
-      setStatus(st);
-      const proj = await api.projectInfo();
-      setInfo(proj);
-    } catch (e) {
-      pushLog("ERR", `${label} 异常 · ${String(e)}`);
-    } finally {
-      setBusy(false);
-    }
+    window.setTimeout(() => setSplash(false), 380);
   };
 
   const hasDefault = store.profiles.some((p) => p.id === store.default_id);
-  const live = status.healthy || status.running;
-
-  const pageMeta = useMemo(() => {
-    switch (page) {
-      case "gateway":
-        return {
-          kicker: "Runtime",
-          title: "网关运行时",
-          sub: "本机 LiteLLM 桥 · 仅 127.0.0.1",
-        };
-      case "models":
-        return {
-          kicker: "Profiles",
-          title: "上游模型",
-          sub: "密钥只保存在本机 .gateway/models.json",
-        };
-      case "clients":
-        return {
-          kicker: "Clients",
-          title: "客户端接入",
-          sub: "Codex / Claude Desktop · 可安全恢复",
-        };
-      case "activity":
-        return {
-          kicker: "Activity",
-          title: "运行日志",
-          sub: "桌面操作与脚本输出",
-        };
-    }
-  }, [page]);
+  const busy = status.busy;
+  const live = status.running || status.healthy;
 
   const onStart = () => {
     if (!hasDefault) {
@@ -199,7 +160,7 @@ export default function App() {
       setDialog({ mode: "add" });
       return;
     }
-    void run("启动网关", () => api.start());
+    void api.start();
   };
 
   const saveModel = async (input: ModelInput, editId?: string) => {
@@ -209,269 +170,233 @@ export default function App() {
     setStore(next);
     setDialog(null);
     pushLog("OK", editId ? `已更新 ${input.name}` : `已保存 ${input.name}`);
-
-    const touchedDefault =
+    const touched =
       (editId && editId === store.default_id) || (!editId && next.profiles.length === 1);
-    if (live && touchedDefault) {
+    if (live && touched) {
       const yes = await ask("配置已变更，是否立即重启网关？", {
         title: "重启网关",
         kind: "info",
         okLabel: "重启",
         cancelLabel: "稍后",
       });
-      if (yes) await run("重启网关", () => api.restart());
+      if (yes) void api.restart();
     }
   };
+
+  const navItems = useMemo(
+    () => [
+      { key: "gateway" as const, title: "网关", icon: Server },
+      { key: "models" as const, title: "模型", icon: Layers3 },
+      { key: "clients" as const, title: "客户端", icon: Users },
+      { key: "activity" as const, title: "日志", icon: Activity },
+    ],
+    [],
+  );
 
   return (
     <>
       {splash && (
         <div className={`splash ${splashExit ? "exit" : ""}`}>
-          <div className="splash-inner">
-            <img className="splash-logo" src="/gateway-logo.png" alt="" />
-            <h1>Codex Chat Gateway</h1>
-            <p>studio console</p>
-            <button type="button" className="splash-cta" onClick={enter}>
-              进入
-            </button>
-            <p className="splash-note">本地模型桥 · 密钥不出本机</p>
-          </div>
+          <Flexbox align="center" gap={16}>
+            <img src="/gateway-logo.png" width={88} height={88} alt="" />
+            <Text as="h1" fontSize={28} weight={700}>
+              Codex Chat Gateway
+            </Text>
+            <Text type="secondary" fontSize={12} style={{ letterSpacing: "0.2em" }}>
+              STUDIO CONSOLE
+            </Text>
+            <Button type="primary" size="large" glass shadow onClick={enter}>
+              进入控制台
+            </Button>
+            <Text type="secondary" fontSize={12}>
+              本地模型桥 · 密钥不出本机
+            </Text>
+          </Flexbox>
         </div>
       )}
 
-      <div className="app-frame">
+      <div className="app-shell">
         <TitleBar />
-        <div className="shell">
-          <aside className="rail">
-            <nav className="rail-nav">
-              <RailButton
-                active={page === "gateway"}
-                title="网关"
-                onClick={() => setPage("gateway")}
-              >
-                <IconGateway />
-              </RailButton>
-              <RailButton
-                active={page === "models"}
-                title="模型"
-                onClick={() => setPage("models")}
-              >
-                <IconModels />
-              </RailButton>
-              <RailButton
-                active={page === "clients"}
-                title="客户端"
-                onClick={() => setPage("clients")}
-              >
-                <IconClients />
-              </RailButton>
-              <RailButton
-                active={page === "activity"}
-                title="日志"
-                onClick={() => setPage("activity")}
-              >
-                <IconActivity />
-              </RailButton>
-            </nav>
-            <div className="rail-foot" title={status.message}>
-              <div className={`rail-dot ${live && status.is_our_gateway ? "on" : ""}`} />
-            </div>
-          </aside>
-
-          <main className="stage">
-            <div className="stage-head">
-              <div>
-                <p className="stage-kicker">{pageMeta.kicker}</p>
-                <h2 className="stage-title">{pageMeta.title}</h2>
-                <p className="stage-sub">{pageMeta.sub}</p>
-              </div>
-              <div className="chip">
-                <span>{info?.version ?? "…"}</span>
-              </div>
-            </div>
-
-            <div className="stage-body" key={page}>
-              {page === "gateway" && (
-                <GatewayPage
-                  status={status}
-                  store={store}
-                  busy={busy}
-                  live={live}
-                  onStart={onStart}
-                  onStop={() => void run("停止网关", () => api.stop())}
-                  onRestart={() => {
-                    if (!hasDefault) {
-                      pushLog("DIM", "请先配置默认模型");
-                      setPage("models");
-                      return;
-                    }
-                    void run("重启网关", () => api.restart());
-                  }}
-                  onCheck={() => void run("接口检查", () => api.check())}
-                  onCopy={() => {
-                    if (copyText(status.endpoint)) pushLog("OK", "已复制接口地址");
-                    else pushLog("ERR", "剪贴板不可用");
-                  }}
-                  onLogs={async () => {
-                    try {
-                      const dir = await api.logsDir();
-                      await openPath(dir);
-                      pushLog("OK", `日志目录 ${dir}`);
-                    } catch (e) {
-                      pushLog("ERR", String(e));
-                    }
-                  }}
-                  onUi={() => void openUrl("http://127.0.0.1:4000/ui")}
+        <div className="workspace">
+          <SideNav
+            avatar={<img src="/gateway-logo.png" width={32} height={32} alt="" style={{ borderRadius: 8 }} />}
+            bottomActions={
+              <Tooltip title="GitHub 仓库">
+                <ActionIcon
+                  icon={ExternalLink}
+                  title="GitHub"
+                  onClick={() => void openUrl(info?.github || GITHUB)}
                 />
-              )}
+              </Tooltip>
+            }
+            topActions={
+              <Flexbox gap={4}>
+                {navItems.map((item) => (
+                  <Tooltip key={item.key} title={item.title} placement="right">
+                    <ActionIcon
+                      active={page === item.key}
+                      icon={item.icon}
+                      size="large"
+                      title={item.title}
+                      onClick={() => setPage(item.key)}
+                    />
+                  </Tooltip>
+                ))}
+              </Flexbox>
+            }
+          />
 
-              {page === "models" && (
-                <ModelsPage
-                  store={store}
-                  selectedId={selectedId}
-                  busy={busy}
-                  onSelect={setSelectedId}
-                  onAdd={() => setDialog({ mode: "add" })}
-                  onEdit={() => {
-                    const p = store.profiles.find((x) => x.id === selectedId);
-                    if (!p) {
-                      pushLog("DIM", "请先选择模型卡片");
-                      return;
-                    }
-                    setDialog({ mode: "edit", profile: p });
-                  }}
-                  onDefault={async () => {
-                    if (!selectedId) {
-                      pushLog("DIM", "请先选择模型卡片");
-                      return;
-                    }
-                    try {
-                      const next = await api.makeDefault(selectedId);
-                      setStore(next);
-                      pushLog("OK", "已设为默认模型");
-                      if (live) {
-                        const yes = await ask("是否立即重启网关使默认模型生效？", {
-                          title: "重启网关",
-                          kind: "info",
-                          okLabel: "重启",
-                          cancelLabel: "稍后",
-                        });
-                        if (yes) await run("重启网关", () => api.restart());
-                      }
-                    } catch (e) {
-                      pushLog("ERR", String(e));
-                    }
-                  }}
-                  onDelete={async () => {
-                    if (!selectedId) {
-                      pushLog("DIM", "请先选择模型卡片");
-                      return;
-                    }
-                    const p = store.profiles.find((x) => x.id === selectedId);
-                    if (!p) return;
-                    const ok = await ask(`删除「${p.name}」？`, {
-                      title: "确认删除",
-                      kind: "warning",
-                      okLabel: "删除",
-                      cancelLabel: "取消",
-                    });
-                    if (!ok) return;
-                    try {
-                      const next = await api.removeModel(selectedId);
-                      setStore(next);
-                      setSelectedId(null);
-                      pushLog("OK", `已删除 ${p.name}`);
-                    } catch (e) {
-                      pushLog("ERR", String(e));
-                    }
-                  }}
-                  onRefresh={() => void loadAll().then(() => pushLog("OK", "已刷新模型列表"))}
-                />
-              )}
+          <main className="workspace-main">
+            <Flexbox gap={16} style={{ minHeight: "100%" }}>
+              <PageHeader page={page} version={info?.version} status={status} />
 
-              {page === "clients" && (
-                <ClientsPage
-                  busy={busy}
-                  autostart={!!info?.autostart}
-                  onScript={(label, script, confirmText) => {
-                    void (async () => {
-                      if (confirmText) {
-                        const ok = await ask(confirmText, {
-                          title: label,
-                          kind: "warning",
-                          okLabel: "继续",
-                          cancelLabel: "取消",
-                        });
-                        if (!ok) {
-                          pushLog("DIM", `已取消 · ${label}`);
-                          return;
-                        }
+              <div className="page-pane" style={{ flex: 1 }}>
+                {page === "gateway" && (
+                  <GatewayView
+                    status={status}
+                    store={store}
+                    busy={busy}
+                    live={live}
+                    onStart={onStart}
+                    onStop={() => void api.stop()}
+                    onRestart={() => {
+                      if (!hasDefault) {
+                        setPage("models");
+                        return;
                       }
-                      await run(label, () => api.runScript(script));
-                    })();
-                  }}
-                  onAutostart={() => {
-                    const enable = !info?.autostart;
-                    void run(enable ? "启用登录自启" : "关闭登录自启", async () => {
+                      void api.restart();
+                    }}
+                    onCheck={() => void api.check()}
+                    onLogs={async () => {
                       try {
-                        const msg = await api.toggleAutostart(enable);
-                        return {
-                          ok: true,
-                          message: msg,
-                          logs: [msg],
-                          status,
-                        };
+                        const dir = await api.logsDir();
+                        await openPath(dir);
+                        pushLog("OK", `日志目录 ${dir}`);
                       } catch (e) {
-                        return {
-                          ok: false,
-                          message: String(e),
-                          logs: [String(e)],
-                          status,
-                        };
+                        pushLog("ERR", String(e));
                       }
-                    });
-                  }}
-                />
-              )}
+                    }}
+                    onUi={() => void openUrl("http://127.0.0.1:4000/ui")}
+                  />
+                )}
 
-              {page === "activity" && (
-                <div className="surface log-panel">
-                  <div className="log-head">
-                    <strong>输出流</strong>
-                    <div className="btn-group">
-                      <button
-                        type="button"
-                        className="btn sm"
-                        onClick={() => {
-                          const text = logs.map((l) => `${l.level}  ${l.message}`).join("\n");
-                          if (copyText(text)) pushLog("OK", "已复制日志");
-                        }}
-                      >
-                        复制
-                      </button>
-                      <button type="button" className="btn sm" onClick={() => setLogs([])}>
-                        清空
-                      </button>
-                    </div>
-                  </div>
-                  <div className="log-body" ref={logRef}>
-                    {logs.length === 0 ? (
-                      <div className="log-line">
-                        <span className="log-lv DIM">DIM</span>
-                        <span className="log-msg">暂无输出</span>
-                      </div>
-                    ) : (
-                      logs.map((l) => (
-                        <div className="log-line" key={l.id}>
-                          <span className={`log-lv ${l.level}`}>{l.level}</span>
-                          <span className="log-msg">{l.message}</span>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
+                {page === "models" && (
+                  <ModelsView
+                    store={store}
+                    selectedId={selectedId}
+                    busy={busy}
+                    onSelect={setSelectedId}
+                    onAdd={() => setDialog({ mode: "add" })}
+                    onEdit={() => {
+                      const p = store.profiles.find((x) => x.id === selectedId);
+                      if (!p) {
+                        pushLog("DIM", "请先选择模型");
+                        return;
+                      }
+                      setDialog({ mode: "edit", profile: p });
+                    }}
+                    onDefault={async () => {
+                      if (!selectedId) return;
+                      try {
+                        const next = await api.makeDefault(selectedId);
+                        setStore(next);
+                        pushLog("OK", "已设为默认");
+                        if (live) {
+                          const yes = await ask("是否立即重启网关？", {
+                            title: "重启",
+                            kind: "info",
+                            okLabel: "重启",
+                            cancelLabel: "稍后",
+                          });
+                          if (yes) void api.restart();
+                        }
+                      } catch (e) {
+                        pushLog("ERR", String(e));
+                      }
+                    }}
+                    onDelete={async () => {
+                      if (!selectedId) return;
+                      const p = store.profiles.find((x) => x.id === selectedId);
+                      if (!p) return;
+                      const ok = await ask(`删除「${p.name}」？`, {
+                        title: "确认删除",
+                        kind: "warning",
+                        okLabel: "删除",
+                        cancelLabel: "取消",
+                      });
+                      if (!ok) return;
+                      try {
+                        setStore(await api.removeModel(selectedId));
+                        setSelectedId(null);
+                        pushLog("OK", `已删除 ${p.name}`);
+                      } catch (e) {
+                        pushLog("ERR", String(e));
+                      }
+                    }}
+                    onRefresh={() =>
+                      void api
+                        .listModels()
+                        .then(setStore)
+                        .then(() => pushLog("OK", "模型列表已刷新"))
+                    }
+                  />
+                )}
+
+                {page === "clients" && (
+                  <ClientsView
+                    busy={busy}
+                    autostart={!!info?.autostart}
+                    onScript={(label, script, confirmText) => {
+                      void (async () => {
+                        if (confirmText) {
+                          const ok = await ask(confirmText, {
+                            title: label,
+                            kind: "warning",
+                            okLabel: "继续",
+                            cancelLabel: "取消",
+                          });
+                          if (!ok) {
+                            pushLog("DIM", `已取消 · ${label}`);
+                            return;
+                          }
+                        }
+                        pushLog("INFO", `▶ ${label}`);
+                        try {
+                          await api.runScript(script);
+                          setInfo(await api.projectInfo());
+                        } catch (e) {
+                          pushLog("ERR", String(e));
+                        }
+                      })();
+                    }}
+                    onAutostart={() => {
+                      const enable = !info?.autostart;
+                      void (async () => {
+                        try {
+                          const msg = await api.toggleAutostart(enable);
+                          pushLog("OK", msg);
+                          setInfo(await api.projectInfo());
+                        } catch (e) {
+                          pushLog("ERR", String(e));
+                        }
+                      })();
+                    }}
+                  />
+                )}
+
+                {page === "activity" && (
+                  <ActivityView logs={logs} onClear={() => setLogs([])} onCopy={() => {
+                    const text = logs.map((l) => `${l.level}  ${l.message}`).join("\n");
+                    void navigator.clipboard.writeText(text).then(
+                      () => pushLog("OK", "已复制日志"),
+                      () => pushLog("ERR", "复制失败"),
+                    );
+                  }} />
+                )}
+              </div>
+
+              <CreditBar info={info} />
+            </Flexbox>
           </main>
         </div>
       </div>
@@ -485,7 +410,7 @@ export default function App() {
             try {
               await saveModel(input, editId);
             } catch (e) {
-              await message(String(e), { title: "保存失败", kind: "error" });
+              await dialogMessage(String(e), { title: "保存失败", kind: "error" });
               throw e;
             }
           }}
@@ -495,31 +420,53 @@ export default function App() {
   );
 }
 
-function RailButton({
-  active,
-  title,
-  onClick,
-  children,
+const PageHeader = memo(function PageHeader({
+  page,
+  version,
+  status,
 }: {
-  active: boolean;
-  title: string;
-  onClick: () => void;
-  children: React.ReactNode;
+  page: Page;
+  version?: string;
+  status: GatewayStatus;
 }) {
-  return (
-    <button
-      type="button"
-      className={`rail-btn ${active ? "active" : ""}`}
-      title={title}
-      aria-label={title}
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  );
-}
+  const meta = {
+    gateway: { title: "网关运行时", sub: "本机 LiteLLM 进程 · 仅 127.0.0.1" },
+    models: { title: "上游模型", sub: "密钥保存在 .gateway/models.json" },
+    clients: { title: "客户端接入", sub: "Codex / Claude Desktop · 可安全恢复" },
+    activity: { title: "运行日志", sub: "后端事件流 · 脚本输出" },
+  }[page];
 
-function GatewayPage({
+  const phaseColor =
+    status.phase === "running"
+      ? "success"
+      : status.phase === "error"
+        ? "error"
+        : status.phase === "starting" || status.phase === "stopping"
+          ? "warning"
+          : "default";
+
+  return (
+    <Flexbox horizontal align="flex-start" distribution="space-between" gap={12}>
+      <Flexbox gap={4}>
+        <Text type="secondary" fontSize={12} weight={600} style={{ letterSpacing: "0.12em" }}>
+          {page.toUpperCase()}
+        </Text>
+        <Text as="h2" fontSize={24} weight={700} style={{ margin: 0 }}>
+          {meta.title}
+        </Text>
+        <Text type="secondary" fontSize={13}>
+          {meta.sub}
+        </Text>
+      </Flexbox>
+      <Flexbox horizontal gap={8} align="center">
+        <Tag color={phaseColor}>{status.phase}</Tag>
+        {version && <Tag>{version}</Tag>}
+      </Flexbox>
+    </Flexbox>
+  );
+});
+
+function GatewayView({
   status,
   store,
   busy,
@@ -528,7 +475,6 @@ function GatewayPage({
   onStop,
   onRestart,
   onCheck,
-  onCopy,
   onLogs,
   onUi,
 }: {
@@ -540,86 +486,106 @@ function GatewayPage({
   onStop: () => void;
   onRestart: () => void;
   onCheck: () => void;
-  onCopy: () => void;
   onLogs: () => void;
   onUi: () => void;
 }) {
-  const stateLabel = !live
-    ? "已停止"
-    : status.is_our_gateway
-      ? "运行中"
-      : "端口占用";
-  const stateClass = !live ? "off" : status.is_our_gateway ? "ok" : "warn";
   const defaultName =
     status.default_model_name ||
     store.profiles.find((p) => p.id === store.default_id)?.name ||
     "未配置";
 
   return (
-    <div className="stack">
-      <div className="grid-metrics">
-        <div className="surface metric">
-          <div className="metric-label">状态</div>
-          <div className={`metric-value ${stateClass}`}>{stateLabel}</div>
-          <div className="metric-foot">{status.message}</div>
-        </div>
-        <div className="surface metric">
-          <div className="metric-label">进程</div>
-          <div className="metric-value">{status.pid ?? "—"}</div>
-          <div className="metric-foot">
-            {status.uptime ? `已运行 ${status.uptime}` : "启动后显示运行时长"}
-          </div>
-        </div>
-        <div className="surface metric">
-          <div className="metric-label">默认模型</div>
-          <div className="metric-value" style={{ fontSize: 18 }}>
-            {defaultName}
-          </div>
-          <div className="metric-foot">{status.model || "—"}</div>
-        </div>
-      </div>
+    <Flexbox gap={14}>
+      {!status.is_our_gateway && status.healthy && (
+        <Alert
+          type="warning"
+          showIcon
+          message="端口 4000 有响应，但可能不是本网关（缺少 codex-chat 路由）"
+        />
+      )}
 
-      <div className="surface panel">
-        <div className="panel-title">控制</div>
-        <div className="row" style={{ marginBottom: 12 }}>
-          <div className="chip">
-            {status.endpoint}
-            <button type="button" className="btn sm" onClick={onCopy}>
-              复制
-            </button>
-          </div>
-        </div>
-        <div className="btn-group">
-          <button
-            type="button"
-            className="btn teal"
-            disabled={busy || (live && status.is_our_gateway)}
-            onClick={onStart}
-          >
-            启动
-          </button>
-          <button type="button" className="btn" disabled={busy || !live} onClick={onStop}>
-            停止
-          </button>
-          <button type="button" className="btn" disabled={busy || !live} onClick={onRestart}>
-            重启
-          </button>
-          <button type="button" className="btn" disabled={busy} onClick={onCheck}>
-            健康检查
-          </button>
-          <button type="button" className="btn ghost" onClick={onLogs}>
-            打开日志目录
-          </button>
-          <button type="button" className="btn ghost" onClick={onUi}>
-            LiteLLM UI
-          </button>
-        </div>
-      </div>
-    </div>
+      <Flexbox horizontal gap={12} style={{ flexWrap: "wrap" }}>
+        <Block variant="outlined" padding={16} style={{ flex: "1 1 200px", minWidth: 180 }}>
+          <Text type="secondary" fontSize={12}>
+            状态
+          </Text>
+          <Text fontSize={22} weight={700} style={{ marginTop: 8 }}>
+            {live ? (status.is_our_gateway ? "运行中" : "端口占用") : "已停止"}
+          </Text>
+          <Text type="secondary" fontSize={12} style={{ marginTop: 8 }}>
+            {status.message}
+          </Text>
+        </Block>
+        <Block variant="outlined" padding={16} style={{ flex: "1 1 200px", minWidth: 180 }}>
+          <Text type="secondary" fontSize={12}>
+            进程
+          </Text>
+          <Text fontSize={22} weight={700} style={{ marginTop: 8 }}>
+            {status.pid ?? "—"}
+          </Text>
+          <Text type="secondary" fontSize={12} style={{ marginTop: 8 }}>
+            {status.uptime ? `已运行 ${status.uptime}` : "启动后显示运行时长"}
+          </Text>
+        </Block>
+        <Block variant="outlined" padding={16} style={{ flex: "1 1 200px", minWidth: 180 }}>
+          <Text type="secondary" fontSize={12}>
+            默认模型
+          </Text>
+          <Text fontSize={18} weight={700} style={{ marginTop: 8 }}>
+            {defaultName}
+          </Text>
+          <Text type="secondary" fontSize={12} style={{ marginTop: 8 }} ellipsis>
+            {status.model || "—"}
+          </Text>
+        </Block>
+      </Flexbox>
+
+      <Block variant="outlined" padding={16}>
+        <Flexbox gap={14}>
+          <Flexbox horizontal gap={10} align="center" style={{ flexWrap: "wrap" }}>
+            <Text type="secondary" fontSize={12}>
+              Endpoint
+            </Text>
+            <Snippet>{status.endpoint}</Snippet>
+          </Flexbox>
+          <Flexbox horizontal gap={8} style={{ flexWrap: "wrap" }}>
+            <Button
+              type="primary"
+              icon={Play}
+              loading={status.phase === "starting"}
+              disabled={busy || (live && status.is_our_gateway)}
+              onClick={onStart}
+            >
+              启动
+            </Button>
+            <Button
+              icon={Square}
+              loading={status.phase === "stopping"}
+              disabled={busy || !live}
+              onClick={onStop}
+            >
+              停止
+            </Button>
+            <Button icon={RotateCcw} disabled={busy || !live} onClick={onRestart}>
+              重启
+            </Button>
+            <Button icon={CheckCircle2} disabled={busy} onClick={onCheck}>
+              健康检查
+            </Button>
+            <Button icon={FolderOpen} variant="outlined" onClick={onLogs}>
+              日志目录
+            </Button>
+            <Button icon={Bot} variant="outlined" onClick={onUi}>
+              LiteLLM UI
+            </Button>
+          </Flexbox>
+        </Flexbox>
+      </Block>
+    </Flexbox>
   );
 }
 
-function ModelsPage({
+function ModelsView({
   store,
   selectedId,
   busy,
@@ -641,71 +607,84 @@ function ModelsPage({
   onRefresh: () => void;
 }) {
   return (
-    <div>
-      <div className="models-toolbar">
-        <span style={{ color: "var(--text-dim)", fontSize: 12.5 }}>
-          {store.profiles.length} 个配置
-        </span>
-        <div className="btn-group">
-          <button type="button" className="btn primary" disabled={busy} onClick={onAdd}>
+    <Flexbox gap={14}>
+      <Flexbox horizontal distribution="space-between" align="center">
+        <Text type="secondary">{store.profiles.length} 个配置</Text>
+        <Flexbox horizontal gap={8}>
+          <Button type="primary" icon={Plus} disabled={busy} onClick={onAdd}>
             添加模型
-          </button>
-          <button type="button" className="btn" disabled={busy} onClick={onRefresh}>
+          </Button>
+          <Button icon={RefreshCw} disabled={busy} onClick={onRefresh}>
             刷新
-          </button>
-        </div>
-      </div>
+          </Button>
+        </Flexbox>
+      </Flexbox>
 
       {store.profiles.length === 0 ? (
-        <div className="empty-state">
-          还没有上游模型。添加后即可启动本地网关。
-          <div style={{ marginTop: 14 }}>
-            <button type="button" className="btn primary" onClick={onAdd}>
+        <Empty
+          title="还没有上游模型"
+          description="添加 DeepSeek / Kimi 等 Chat Completions 接口"
+          action={
+            <Button type="primary" icon={Plus} onClick={onAdd}>
               立即添加
-            </button>
-          </div>
-        </div>
+            </Button>
+          }
+        />
       ) : (
         <>
-          <div className="models-grid">
+          <Flexbox gap={10} horizontal style={{ flexWrap: "wrap" }}>
             {store.profiles.map((p) => {
               const isDefault = p.id === store.default_id;
+              const selected = selectedId === p.id;
               return (
-                <button
-                  type="button"
+                <Block
                   key={p.id}
-                  className={`model-card ${selectedId === p.id ? "selected" : ""} ${isDefault ? "default" : ""}`}
+                  clickable
+                  variant={selected ? "filled" : "outlined"}
+                  padding={14}
                   onClick={() => onSelect(p.id)}
                   onDoubleClick={onEdit}
+                  style={{ width: 280, cursor: "pointer" }}
                 >
-                  <div className="model-name">{p.name}</div>
-                  <div className="model-meta">
-                    <div>{p.model_id}</div>
-                    <div>{p.litellm_model}</div>
-                    <div>{p.base_url}</div>
-                  </div>
-                </button>
+                  <Flexbox gap={8}>
+                    <Flexbox horizontal distribution="space-between" align="center">
+                      <Text weight={700} ellipsis style={{ maxWidth: 180 }}>
+                        {p.name}
+                      </Text>
+                      {isDefault && <Tag color="success">DEFAULT</Tag>}
+                    </Flexbox>
+                    <Text type="secondary" fontSize={12} ellipsis>
+                      {p.model_id}
+                    </Text>
+                    <Text type="secondary" fontSize={11} ellipsis>
+                      {p.litellm_model}
+                    </Text>
+                    <Text type="secondary" fontSize={11} ellipsis>
+                      {p.base_url}
+                    </Text>
+                  </Flexbox>
+                </Block>
               );
             })}
-          </div>
-          <div className="model-actions">
-            <button type="button" className="btn" disabled={busy} onClick={onDefault}>
+          </Flexbox>
+          <Flexbox horizontal gap={8}>
+            <Button icon={Star} disabled={busy} onClick={onDefault}>
               设为默认
-            </button>
-            <button type="button" className="btn" disabled={busy} onClick={onEdit}>
+            </Button>
+            <Button icon={Pencil} disabled={busy} onClick={onEdit}>
               编辑
-            </button>
-            <button type="button" className="btn danger" disabled={busy} onClick={onDelete}>
+            </Button>
+            <Button danger icon={Trash2} disabled={busy} onClick={onDelete}>
               删除
-            </button>
-          </div>
+            </Button>
+          </Flexbox>
         </>
       )}
-    </div>
+    </Flexbox>
   );
 }
 
-function ClientsPage({
+function ClientsView({
   busy,
   autostart,
   onScript,
@@ -717,73 +696,171 @@ function ClientsPage({
   onAutostart: () => void;
 }) {
   return (
-    <div className="client-grid">
-      <div className="surface client-card">
-        <h3>Codex</h3>
-        <p>写入本地 Responses 提供方，自动备份并保留 MCP / 插件配置。</p>
-        <div className="btn-group">
-          <button
-            type="button"
-            className="btn primary"
-            disabled={busy}
-            onClick={() => onScript("配置 Codex", "configure-codex.ps1")}
-          >
-            配置
-          </button>
-          <button
-            type="button"
-            className="btn danger"
-            disabled={busy}
-            onClick={() =>
-              onScript(
-                "恢复 Codex",
-                "restore-codex.ps1",
-                "撤销网关相关 Codex 配置并尽量恢复官方设置？",
-              )
-            }
-          >
-            恢复官方
-          </button>
-        </div>
-      </div>
+    <Flexbox gap={12} horizontal style={{ flexWrap: "wrap" }}>
+      <Block variant="outlined" padding={18} style={{ flex: "1 1 320px" }}>
+        <Flexbox gap={10}>
+          <Text weight={700} fontSize={16}>
+            Codex
+          </Text>
+          <Text type="secondary" fontSize={13}>
+            写入 Responses 提供方，自动备份并保留 MCP / 插件。
+          </Text>
+          <Flexbox horizontal gap={8}>
+            <Button
+              type="primary"
+              disabled={busy}
+              onClick={() => onScript("配置 Codex", "configure-codex.ps1")}
+            >
+              配置
+            </Button>
+            <Button
+              danger
+              disabled={busy}
+              onClick={() =>
+                onScript(
+                  "恢复 Codex",
+                  "restore-codex.ps1",
+                  "撤销网关相关 Codex 配置并尽量恢复官方设置？",
+                )
+              }
+            >
+              恢复官方
+            </Button>
+          </Flexbox>
+        </Flexbox>
+      </Block>
 
-      <div className="surface client-card">
-        <h3>Claude Desktop</h3>
-        <p>仅配置 Code 模式 3P Profile，不改普通聊天、MCP 或应用本体。</p>
-        <div className="btn-group">
-          <button
-            type="button"
-            className="btn primary"
-            disabled={busy}
-            onClick={() => onScript("配置 Claude Desktop", "configure-claude-desktop.ps1")}
-          >
-            配置
-          </button>
-          <button
-            type="button"
-            className="btn danger"
-            disabled={busy}
-            onClick={() =>
-              onScript(
-                "恢复 Claude",
-                "restore-claude-desktop.ps1",
-                "移除本项目 Profile 并切回官方 1P 模式？",
-              )
-            }
-          >
-            恢复官方
-          </button>
-        </div>
-      </div>
+      <Block variant="outlined" padding={18} style={{ flex: "1 1 320px" }}>
+        <Flexbox gap={10}>
+          <Text weight={700} fontSize={16}>
+            Claude Desktop
+          </Text>
+          <Text type="secondary" fontSize={13}>
+            仅配置 Code 模式 3P Profile，不改普通聊天或 MCP。
+          </Text>
+          <Flexbox horizontal gap={8}>
+            <Button
+              type="primary"
+              disabled={busy}
+              onClick={() => onScript("配置 Claude Desktop", "configure-claude-desktop.ps1")}
+            >
+              配置
+            </Button>
+            <Button
+              danger
+              disabled={busy}
+              onClick={() =>
+                onScript(
+                  "恢复 Claude",
+                  "restore-claude-desktop.ps1",
+                  "移除本项目 Profile 并切回官方 1P 模式？",
+                )
+              }
+            >
+              恢复官方
+            </Button>
+          </Flexbox>
+        </Flexbox>
+      </Block>
 
-      <div className="surface client-card" style={{ gridColumn: "1 / -1" }}>
-        <h3>系统</h3>
-        <p>登录 Windows 后自动启动网关后台进程（不启动本控制台）。</p>
-        <button type="button" className="btn block" disabled={busy} onClick={onAutostart}>
-          <span>登录自启 · {autostart ? "已开启" : "已关闭"}</span>
-          <span className="sub">{autostart ? "点击关闭" : "点击开启"}</span>
-        </button>
-      </div>
+      <Block variant="outlined" padding={18} style={{ flex: "1 1 100%" }}>
+        <Flexbox horizontal distribution="space-between" align="center" gap={12}>
+          <Flexbox gap={4}>
+            <Text weight={700} fontSize={16}>
+              登录自启
+            </Text>
+            <Text type="secondary" fontSize={13}>
+              登录 Windows 后自动启动网关进程（不启动本控制台）
+            </Text>
+          </Flexbox>
+          <Button icon={Settings2} disabled={busy} onClick={onAutostart}>
+            {autostart ? "已开启 · 点击关闭" : "已关闭 · 点击开启"}
+          </Button>
+        </Flexbox>
+      </Block>
+    </Flexbox>
+  );
+}
+
+function ActivityView({
+  logs,
+  onClear,
+  onCopy,
+}: {
+  logs: LogLine[];
+  onClear: () => void;
+  onCopy: () => void;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    ref.current?.scrollTo({ top: ref.current.scrollHeight });
+  }, [logs]);
+
+  return (
+    <Block variant="outlined" padding={0}>
+      <Flexbox>
+        <Flexbox
+          horizontal
+          distribution="space-between"
+          align="center"
+          padding={12}
+          style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}
+        >
+          <Text weight={600}>事件流</Text>
+          <Flexbox horizontal gap={8}>
+            <Button size="small" icon={Copy} onClick={onCopy}>
+              复制
+            </Button>
+            <Button size="small" onClick={onClear}>
+              清空
+            </Button>
+          </Flexbox>
+        </Flexbox>
+        <div className="log-scroll" ref={ref}>
+          {logs.length === 0 ? (
+            <Text type="secondary">暂无输出 · 启动/停止网关时会推送事件</Text>
+          ) : (
+            logs.map((l) => (
+              <div className="log-line" key={l.id}>
+                <span style={{ opacity: 0.7, fontWeight: 700 }}>{l.level}</span>
+                <span>{l.message}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </Flexbox>
+    </Block>
+  );
+}
+
+function CreditBar({ info }: { info: ProjectInfo | null }) {
+  return (
+    <div className="credit-bar">
+      <Icon icon={ExternalLink} size="small" />
+      <a
+        href={info?.github || GITHUB}
+        onClick={(e) => {
+          e.preventDefault();
+          void openUrl(info?.github || GITHUB);
+        }}
+      >
+        github.com/xuyuanzhang1122/codex-chat-gateway-windows
+      </a>
+      <span>·</span>
+      <span>Owner: xuyuanzhang1122</span>
+      <span>·</span>
+      <span>UI by</span>
+      <a
+        href={LOBE_UI}
+        onClick={(e) => {
+          e.preventDefault();
+          void openUrl(LOBE_UI);
+        }}
+      >
+        LobeHub UI
+      </a>
+      <span>·</span>
+      <span>MIT · 社区网关，非 OpenAI 官方</span>
     </div>
   );
 }
@@ -802,12 +879,9 @@ function ModelDialog({
   const [name, setName] = useState(profile?.name ?? "");
   const [url, setUrl] = useState(profile?.base_url ?? "");
   const [key, setKey] = useState(profile?.api_key ?? "");
-  const [showKey, setShowKey] = useState(false);
   const [modelId, setModelId] = useState(profile?.model_id ?? "");
-  const [msg, setMsg] = useState<{ text: string; kind: "" | "err" | "ok" }>({
-    text: "",
-    kind: "",
-  });
+  const [msg, setMsg] = useState<string>("");
+  const [msgType, setMsgType] = useState<"success" | "error" | "info">("info");
   const [fetching, setFetching] = useState(false);
   const [picker, setPicker] = useState<string[] | null>(null);
   const [filter, setFilter] = useState("");
@@ -822,148 +896,145 @@ function ModelDialog({
   const fetchList = async () => {
     const base = url.trim().replace(/\/+$/, "");
     if (!/^https?:\/\//i.test(base)) {
-      setMsg({ text: "请填写有效的 HTTP(S) 地址", kind: "err" });
+      setMsgType("error");
+      setMsg("请填写有效的 HTTP(S) 地址");
       return;
     }
     if (!key.trim()) {
-      setMsg({ text: "请填写 API Key", kind: "err" });
+      setMsgType("error");
+      setMsg("请填写 API Key");
       return;
     }
     setFetching(true);
-    setMsg({ text: "正在拉取模型列表…", kind: "" });
+    setMsgType("info");
+    setMsg("正在拉取模型列表…");
     try {
       const ids = await api.fetchModels(base, key.trim());
       setPicker(ids);
-      setMsg({ text: `共 ${ids.length} 个模型`, kind: "ok" });
+      setMsgType("success");
+      setMsg(`共 ${ids.length} 个模型`);
     } catch (e) {
-      setMsg({ text: `${String(e)} · 可手动填写模型 ID`, kind: "err" });
+      setMsgType("error");
+      setMsg(`${String(e)} · 可手动填写模型 ID`);
     } finally {
       setFetching(false);
     }
   };
 
   return (
-    <div className="modal-root" onClick={onClose}>
-      <div className="surface modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{mode === "add" ? "添加上游模型" : "编辑模型"}</h2>
-        <p className="hint">按 API URL → Key → 模型 的顺序配置</p>
-
-        {picker ? (
-          <>
-            <div className="field">
-              <label>过滤</label>
-              <input
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-                placeholder="搜索模型 ID"
-                autoFocus
-              />
-            </div>
-            <div className="picker">
-              {filtered.map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  className={modelId === id ? "active" : ""}
-                  onClick={() => {
-                    setModelId(id);
-                    if (!name.trim()) setName(id);
-                    setPicker(null);
-                    setMsg({ text: `已选择 ${id}`, kind: "ok" });
-                  }}
-                >
-                  {id}
-                </button>
-              ))}
-              {filtered.length === 0 && (
-                <div style={{ padding: 16, color: "var(--text-faint)" }}>无匹配项</div>
-              )}
-            </div>
-            <div className="modal-actions">
-              <button type="button" className="btn" onClick={() => setPicker(null)}>
-                返回
-              </button>
-            </div>
-          </>
+    <Modal
+      open
+      title={mode === "add" ? "添加上游模型" : "编辑模型"}
+      onCancel={onClose}
+      footer={
+        picker ? (
+          <Button onClick={() => setPicker(null)}>返回</Button>
         ) : (
-          <>
-            <div className="field">
-              <label>名称</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} />
-            </div>
-            <div className="field">
-              <label>API Base URL</label>
-              <input
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://api.example.com/v1"
-              />
-            </div>
-            <div className="field">
-              <label>API Key</label>
-              <div className="field-row">
-                <input
-                  type={showKey ? "text" : "password"}
-                  value={key}
-                  onChange={(e) => setKey(e.target.value)}
-                />
-                <button type="button" className="btn sm" onClick={() => setShowKey((v) => !v)}>
-                  {showKey ? "隐藏" : "显示"}
-                </button>
-              </div>
-            </div>
-            <div className="field">
-              <label>模型 ID</label>
-              <div className="field-row">
-                <input
-                  value={modelId}
-                  onChange={(e) => setModelId(e.target.value)}
-                  placeholder="deepseek-chat"
-                />
-                <button
-                  type="button"
-                  className="btn sm"
-                  disabled={fetching}
-                  onClick={() => void fetchList()}
-                >
-                  {fetching ? "…" : "在线获取"}
-                </button>
-              </div>
-            </div>
-            <div className={`field-msg ${msg.kind}`}>{msg.text}</div>
-            <div className="modal-actions">
-              <button type="button" className="btn" disabled={saving} onClick={onClose}>
-                取消
-              </button>
-              <button
-                type="button"
-                className="btn primary"
-                disabled={saving}
+          <Flexbox horizontal gap={8} distribution="flex-end">
+            <Button onClick={onClose} disabled={saving}>
+              取消
+            </Button>
+            <Button
+              type="primary"
+              loading={saving}
+              onClick={() => {
+                void (async () => {
+                  setSaving(true);
+                  try {
+                    await onSave(
+                      {
+                        name: name.trim(),
+                        base_url: url.trim().replace(/\/+$/, ""),
+                        api_key: key,
+                        model_id: modelId.trim(),
+                      },
+                      mode === "edit" ? profile?.id : undefined,
+                    );
+                  } finally {
+                    setSaving(false);
+                  }
+                })();
+              }}
+            >
+              保存
+            </Button>
+          </Flexbox>
+        )
+      }
+      width={480}
+    >
+      {picker ? (
+        <Flexbox gap={12}>
+          <SearchBar
+            value={filter}
+            onInputChange={(v) => setFilter(v)}
+            placeholder="搜索模型 ID"
+            allowClear
+          />
+          <Flexbox gap={4} style={{ maxHeight: 320, overflow: "auto" }}>
+            {filtered.map((id) => (
+              <Block
+                key={id}
+                clickable
+                variant={modelId === id ? "filled" : "outlined"}
+                padding={10}
                 onClick={() => {
-                  void (async () => {
-                    setSaving(true);
-                    try {
-                      await onSave(
-                        {
-                          name: name.trim(),
-                          base_url: url.trim().replace(/\/+$/, ""),
-                          api_key: key,
-                          model_id: modelId.trim(),
-                        },
-                        mode === "edit" ? profile?.id : undefined,
-                      );
-                    } finally {
-                      setSaving(false);
-                    }
-                  })();
+                  setModelId(id);
+                  if (!name.trim()) setName(id);
+                  setPicker(null);
+                  setMsgType("success");
+                  setMsg(`已选择 ${id}`);
                 }}
               >
-                保存
-              </button>
-            </div>
-          </>
-        )}
-      </div>
-    </div>
+                <Text fontSize={12}>{id}</Text>
+              </Block>
+            ))}
+            {filtered.length === 0 && <Empty title="无匹配项" />}
+          </Flexbox>
+        </Flexbox>
+      ) : (
+        <Form gap={12} layout="vertical">
+          <FormItem label="名称">
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="配置名称" />
+          </FormItem>
+          <FormItem label="API Base URL">
+            <Input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://api.example.com/v1"
+            />
+          </FormItem>
+          <FormItem label="API Key">
+            <InputPassword
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              placeholder="sk-…"
+            />
+          </FormItem>
+          <FormItem label="模型 ID">
+            <Flexbox horizontal gap={8}>
+              <Input
+                value={modelId}
+                onChange={(e) => setModelId(e.target.value)}
+                placeholder="deepseek-chat"
+                style={{ flex: 1 }}
+              />
+              <Button loading={fetching} onClick={() => void fetchList()}>
+                在线获取
+              </Button>
+            </Flexbox>
+          </FormItem>
+          {msg && (
+            <Alert
+              type={msgType === "success" ? "success" : msgType === "error" ? "error" : "info"}
+              showIcon
+              message={msg}
+            />
+          )}
+        </Form>
+      )}
+    </Modal>
   );
 }
+
+export default App;

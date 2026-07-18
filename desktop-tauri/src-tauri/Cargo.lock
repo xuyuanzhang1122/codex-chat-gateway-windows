@@ -472,6 +472,7 @@ name = "codex-chat-gateway-desktop"
 version = "1.3.0"
 dependencies = [
  "chrono",
+ "parking_lot",
  "serde",
  "serde_json",
  "sysinfo",
@@ -479,7 +480,6 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
- "thiserror 2.0.18",
  "ureq",
  "uuid",
 ]

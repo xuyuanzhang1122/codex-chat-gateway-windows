@@ -64,7 +64,6 @@ pub fn read_store() -> Result<ModelStore, String> {
     let root = project_root();
     let path = models_path(&root);
     if !path.exists() {
-        // try legacy .env migration
         if let Some(store) = import_legacy_env(&root)? {
             return Ok(store);
         }
@@ -73,8 +72,6 @@ pub fn read_store() -> Result<ModelStore, String> {
     let text = fs::read_to_string(&path).map_err(|e| format!("读取模型配置失败: {e}"))?;
     let mut store: ModelStore =
         serde_json::from_str(&text).map_err(|e| format!("解析 models.json 失败: {e}"))?;
-    // Normalize: if profiles arrived as a single object from legacy writers, serde already rejects;
-    // empty default when missing profile.
     if store.default_id.is_empty() {
         if let Some(first) = store.profiles.first() {
             store.default_id = first.id.clone();
@@ -118,13 +115,21 @@ fn import_legacy_env(root: &Path) -> Result<Option<ModelStore>, String> {
             continue;
         }
         if let Some((k, v)) = trimmed.split_once('=') {
-            values.insert(k.trim().to_string(), v.trim().trim_matches(|c| c == '"' || c == '\'').to_string());
+            values.insert(
+                k.trim().to_string(),
+                v.trim()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_string(),
+            );
         }
     }
     let model = values.get("UPSTREAM_MODEL").cloned().unwrap_or_default();
     let base_url = values.get("UPSTREAM_BASE_URL").cloned().unwrap_or_default();
     let api_key = values.get("UPSTREAM_API_KEY").cloned().unwrap_or_default();
-    if model.is_empty() || base_url.is_empty() || api_key.is_empty() || api_key == "replace-with-new-key"
+    if model.is_empty()
+        || base_url.is_empty()
+        || api_key.is_empty()
+        || api_key == "replace-with-new-key"
     {
         return Ok(None);
     }
@@ -241,8 +246,9 @@ fn validate_input(input: &ModelInput) -> Result<(), String> {
 pub fn fetch_remote_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
     let base = base_url.trim().trim_end_matches('/');
     let url = format!("{base}/models");
+    // Upstream model listing only — keep TLS dependency minimal (http ok for many local proxies)
     let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(20))
         .build();
     let resp = agent
         .get(&url)

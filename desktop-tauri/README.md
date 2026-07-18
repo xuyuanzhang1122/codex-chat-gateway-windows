@@ -1,28 +1,36 @@
 # Codex Chat Gateway · Tauri Desktop
 
-新一代 **Studio** 控制台：基于 **Tauri 2 + React**，**不是**旧 WPF 界面的移植。
+新一代 **Studio** 控制台：基于 **Tauri 2 + React + [LobeHub UI](https://ui.lobehub.com/)**，不是旧 WPF 界面的移植。
+
+## 署名 / Credits
+
+| | |
+|---|---|
+| **项目仓库** | [xuyuanzhang1122/codex-chat-gateway-windows](https://github.com/xuyuanzhang1122/codex-chat-gateway-windows) |
+| **Owner** | [xuyuanzhang1122](https://github.com/xuyuanzhang1122) |
+| **UI 组件库** | [LobeHub UI](https://ui.lobehub.com/) · [lobehub/lobe-ui](https://github.com/lobehub/lobe-ui) |
+| **协议转换** | [LiteLLM](https://github.com/BerriAI/litellm)（本机进程） |
+
+应用内底部 Credit 栏与「关于」数据同样展示上述署名。
 
 ## UI / 窗口
 
 - **无边框原生窗口** + 自定义标题栏（拖拽 / 最小化 / 最大化 / 关闭）
-- **左侧导航轨** + 分页舞台（运行时 / 模型卡片 / 客户端 / 日志）
-- 全新视觉语言：深空背景、紫/青双强调色、指标卡与模型卡片（非旧版左右栏表格布局）
-- **零 Canvas 粒子**：静态 CSS 星点，避免 WebView2 每帧重绘卡顿
+- **LobeHub `SideNav` / `Button` / `Block` / `Modal` / `Form` / `Snippet` / `Tag` / `Alert` / `Empty` 等组件**，非原生丑陋控件
+- 深色 ThemeProvider（`primaryColor: purple`）
+- 左侧导航 + 分页：运行时 / 模型 / 客户端 / 日志
+
+## 后端架构（相对 bat 堆叠）
+
+- Rust `GatewayManager`：进程生命周期、state 持久化、健康探测、内存缓存
+- **事件推送** `gateway://status|log|action`，前端不轮询阻塞
+- **启动/停止异步 worker 线程**，不卡 UI
+- Codex / Claude 配置仍走既有脚本（白名单），网关启停不再依赖 bat
 
 ## 性能
 
-- 轮询只做轻量 liveliness + 单 PID 探测，不扫全进程表、不每次拉 `/v1/models`
-- 启停/检查路径才做完整身份校验与进程扫描
-- 日志上限 300 行；无 `backdrop-filter` 大面积毛玻璃
-
-## 网关逻辑修复（相对旧 WPF）
-
-- 无 `state.json` 时仍可按进程命令行停止本项目网关
-- 健康检查 + `/v1/models` 身份校验（必须含 `codex-chat`）
-- 端口被占用但不是本网关时拒绝启动
-- 已在运行时补写 / 同步 `state.json`
-- 恢复 Codex / Claude 前二次确认
-- 修改默认或当前模型后提示是否立即重启
+- 轻量 liveliness + 单 PID；全量路由校验仅在检查/启动就绪
+- 切页无重挂载动画风暴；日志上限 250 行
 
 ## 开发
 

@@ -1,21 +1,32 @@
-use crate::models::{claude_litellm_model, default_profile, read_store};
+//! Native gateway process manager.
+//!
+//! Protocol conversion still runs in the bundled LiteLLM process (`run_gateway.py`).
+//! Lifecycle, health, state persistence and UI snapshots are owned by this module —
+//! no PowerShell involved for start/stop/status.
+
+use crate::models::{claude_litellm_model, default_profile, read_store, ModelStore};
 use crate::paths::{
     config_yaml, logs_dir, project_root, python_runtime, run_gateway_py, state_path,
 };
 use chrono::{DateTime, Local, Utc};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use sysinfo::{ProcessesToUpdate, System};
+use tauri::{AppHandle, Emitter};
 
 pub const GATEWAY_HOST: &str = "127.0.0.1";
 pub const GATEWAY_PORT: u16 = 4000;
 pub const ENDPOINT: &str = "http://127.0.0.1:4000";
 pub const ENDPOINT_V1: &str = "http://127.0.0.1:4000/v1";
+pub const GITHUB_REPO: &str = "https://github.com/xuyuanzhang1122/codex-chat-gateway-windows";
 
 const REQUIRED_ROUTES: &[&str] = &[
     "codex-chat",
@@ -34,8 +45,19 @@ pub struct GatewayStateFile {
     pub started_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayPhase {
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+    Error,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayStatus {
+    pub phase: GatewayPhase,
     pub running: bool,
     pub healthy: bool,
     pub is_our_gateway: bool,
@@ -47,6 +69,27 @@ pub struct GatewayStatus {
     pub default_model_name: Option<String>,
     pub message: String,
     pub routes: Vec<String>,
+    pub busy: bool,
+}
+
+impl Default for GatewayStatus {
+    fn default() -> Self {
+        Self {
+            phase: GatewayPhase::Stopped,
+            running: false,
+            healthy: false,
+            is_our_gateway: false,
+            endpoint: ENDPOINT_V1.into(),
+            pid: None,
+            model: None,
+            started_at: None,
+            uptime: None,
+            default_model_name: None,
+            message: "未启动".into(),
+            routes: Vec::new(),
+            busy: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,433 +100,656 @@ pub struct ActionResult {
     pub status: GatewayStatus,
 }
 
-/// Lightweight status for UI polling — no full process table scan, no /models fan-out.
-pub fn status() -> GatewayStatus {
-    status_inner(false)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEvent {
+    pub level: String,
+    pub message: String,
 }
 
-/// Full status after start/stop/check — may scan processes and list model routes.
-pub fn status_full() -> GatewayStatus {
-    status_inner(true)
+struct Inner {
+    status: GatewayStatus,
+    /// Cached default model display name (invalidated on model edits).
+    default_name: Option<String>,
+    /// Owned child when we started the process from this session (optional).
+    child: Option<Child>,
+    last_health_ok: bool,
+    last_probe: Instant,
 }
 
-fn status_inner(detailed: bool) -> GatewayStatus {
-    let root = project_root();
-    let store = read_store().ok();
-    let default_name = store
-        .as_ref()
-        .and_then(|s| default_profile(s))
-        .map(|p| p.name.clone());
+pub struct GatewayManager {
+    inner: RwLock<Inner>,
+    op_lock: parking_lot::Mutex<()>,
+    watcher_started: AtomicBool,
+}
 
-    let healthy = health_alive_ms(if detailed { 1200 } else { 500 });
-    let routes = if detailed && healthy {
-        list_routes().unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+impl GatewayManager {
+    pub fn new() -> Self {
+        let default_name = read_store()
+            .ok()
+            .and_then(|s| default_profile(&s).map(|p| p.name.clone()));
+        let mut status = GatewayStatus::default();
+        status.default_model_name = default_name.clone();
+        Self {
+            inner: RwLock::new(Inner {
+                status,
+                default_name,
+                child: None,
+                last_health_ok: false,
+                last_probe: Instant::now() - Duration::from_secs(60),
+            }),
+            op_lock: parking_lot::Mutex::new(()),
+            watcher_started: AtomicBool::new(false),
+        }
+    }
 
-    let file = read_state_file(&root);
-    let (pid, model, started_at, uptime) = if let Some(ref st) = file {
-        if pid_alive(st.pid) {
-            (
-                Some(st.pid),
-                Some(st.model.clone()),
-                Some(st.started_at.clone()),
-                format_uptime(&st.started_at),
-            )
-        } else if healthy {
-            // Process gone from state but port still answers
-            (None, Some(st.model.clone()), None, None)
-        } else {
-            // stale state — only remove on detailed path to avoid disk churn while polling
-            if detailed {
-                let _ = fs::remove_file(state_path(&root));
+    pub fn snapshot(&self) -> GatewayStatus {
+        let mut st = self.inner.read().status.clone();
+        // Refresh uptime string cheaply without I/O
+        if let Some(ref started) = st.started_at {
+            st.uptime = format_uptime(started);
+        }
+        st
+    }
+
+    pub fn set_default_name(&self, name: Option<String>) {
+        let mut g = self.inner.write();
+        g.default_name = name.clone();
+        g.status.default_model_name = name;
+    }
+
+    pub fn invalidate_models(&self, store: &ModelStore) {
+        let name = default_profile(store).map(|p| p.name.clone());
+        self.set_default_name(name);
+    }
+
+    /// Instant status for UI — uses cache; optionally does a cheap health probe if stale.
+    pub fn refresh_light(&self) -> GatewayStatus {
+        {
+            let g = self.inner.read();
+            if g.last_probe.elapsed() < Duration::from_millis(1500) {
+                let mut st = g.status.clone();
+                if let Some(ref started) = st.started_at {
+                    st.uptime = format_uptime(started);
+                }
+                return st;
             }
-            (None, None, None, None)
         }
-    } else if detailed {
-        if let Some(pid) = find_gateway_pid(&root) {
-            (Some(pid), None, None, None)
+
+        let healthy = health_probe(350);
+        let mut g = self.inner.write();
+        g.last_probe = Instant::now();
+        g.last_health_ok = healthy;
+
+        if g.status.busy {
+            // Don't fight an in-flight start/stop
+            return g.status.clone();
+        }
+
+        if healthy {
+            g.status.healthy = true;
+            g.status.running = true;
+            g.status.is_our_gateway = true;
+            if g.status.phase == GatewayPhase::Stopped || g.status.phase == GatewayPhase::Error {
+                g.status.phase = GatewayPhase::Running;
+            }
+            if g.status.phase == GatewayPhase::Starting {
+                g.status.phase = GatewayPhase::Running;
+            }
+            g.status.message = "运行中".into();
+            // Fill pid from state file once if missing
+            if g.status.pid.is_none() {
+                if let Some(file) = read_state_file(&project_root()) {
+                    if pid_alive(file.pid) {
+                        g.status.pid = Some(file.pid);
+                        g.status.model = Some(file.model);
+                        g.status.started_at = Some(file.started_at);
+                    }
+                }
+            } else if let Some(pid) = g.status.pid {
+                if !pid_alive(pid) {
+                    g.status.pid = None;
+                }
+            }
         } else {
-            (None, None, None, None)
+            g.status.healthy = false;
+            // If we think we're running but health failed, verify pid
+            if let Some(pid) = g.status.pid {
+                if !pid_alive(pid) {
+                    g.status.pid = None;
+                    g.status.started_at = None;
+                    g.status.uptime = None;
+                    g.status.phase = GatewayPhase::Stopped;
+                    g.status.running = false;
+                    g.status.is_our_gateway = false;
+                    g.status.message = "网关未在运行".into();
+                    g.status.routes.clear();
+                } else {
+                    g.status.running = true;
+                    g.status.message = "进程在线，健康检查未通过".into();
+                }
+            } else {
+                g.status.running = false;
+                g.status.is_our_gateway = false;
+                g.status.phase = GatewayPhase::Stopped;
+                g.status.message = "网关未在运行".into();
+                g.status.routes.clear();
+            }
         }
-    } else {
-        (None, None, None, None)
-    };
 
-    // Polling path: liveliness only. Start/check path: verify codex-chat route.
-    let is_our = if detailed {
-        healthy && is_our_gateway(&routes)
-    } else {
-        healthy
-    };
-
-    let running = healthy || pid.is_some();
-    let message = if !running {
-        "网关未在运行".into()
-    } else if healthy && is_our {
-        if detailed && !routes.is_empty() {
-            "运行中 · 本机网关身份校验通过".into()
-        } else {
-            "运行中".into()
+        g.status.default_model_name = g.default_name.clone();
+        if let Some(ref started) = g.status.started_at {
+            g.status.uptime = format_uptime(started);
         }
-    } else if healthy && !is_our {
-        "端口 4000 有服务响应，但缺少 codex-chat 路由（可能不是本网关）".into()
-    } else {
-        "检测到相关进程，但健康检查未通过".into()
-    };
-
-    GatewayStatus {
-        running,
-        healthy,
-        is_our_gateway: is_our,
-        endpoint: ENDPOINT_V1.into(),
-        pid,
-        model,
-        started_at,
-        uptime,
-        default_model_name: default_name,
-        message,
-        routes,
+        g.status.clone()
     }
-}
 
-pub fn start_gateway() -> ActionResult {
-    let mut logs = Vec::new();
-    let root = project_root();
-    logs.push(format!("项目目录: {}", root.display()));
-
-    // Already healthy & ours → ensure state and return ok
-    let current = status_full();
-    if current.healthy && current.is_our_gateway {
-        if let Err(e) = ensure_state_for_running(&root, &mut logs) {
-            logs.push(format!("补写状态失败: {e}"));
+    pub fn refresh_full(&self) -> GatewayStatus {
+        let healthy = health_probe(1000);
+        let routes = if healthy {
+            list_routes().unwrap_or_default()
         } else {
-            logs.push("网关已在运行，已同步 state.json".into());
+            Vec::new()
+        };
+        let is_our = healthy && is_our_gateway(&routes);
+        let root = project_root();
+        let file = read_state_file(&root);
+
+        let mut g = self.inner.write();
+        g.last_probe = Instant::now();
+        g.last_health_ok = healthy;
+        g.status.healthy = healthy;
+        g.status.is_our_gateway = is_our;
+        g.status.routes = routes;
+        g.status.default_model_name = g.default_name.clone();
+
+        if let Some(ref st) = file {
+            if pid_alive(st.pid) {
+                g.status.pid = Some(st.pid);
+                g.status.model = Some(st.model.clone());
+                g.status.started_at = Some(st.started_at.clone());
+                g.status.uptime = format_uptime(&st.started_at);
+            } else if !healthy {
+                let _ = fs::remove_file(state_path(&root));
+                g.status.pid = None;
+                g.status.model = None;
+                g.status.started_at = None;
+                g.status.uptime = None;
+            }
         }
-        return ActionResult {
+
+        g.status.running = healthy || g.status.pid.is_some();
+        if !g.status.busy {
+            g.status.phase = if g.status.running {
+                if is_our || healthy {
+                    GatewayPhase::Running
+                } else {
+                    GatewayPhase::Error
+                }
+            } else {
+                GatewayPhase::Stopped
+            };
+        }
+
+        g.status.message = if !g.status.running {
+            "网关未在运行".into()
+        } else if healthy && is_our {
+            "运行中 · 路由校验通过".into()
+        } else if healthy {
+            "端口有响应，但缺少 codex-chat 路由".into()
+        } else {
+            "进程可能残留，健康检查失败".into()
+        };
+
+        g.status.clone()
+    }
+
+    pub fn start_background(self: &Arc<Self>, app: AppHandle) {
+        let mgr = Arc::clone(self);
+        thread::Builder::new()
+            .name("gw-start".into())
+            .spawn(move || {
+                let _guard = mgr.op_lock.lock();
+                mgr.run_start(&app);
+            })
+            .ok();
+    }
+
+    pub fn stop_background(self: &Arc<Self>, app: AppHandle) {
+        let mgr = Arc::clone(self);
+        thread::Builder::new()
+            .name("gw-stop".into())
+            .spawn(move || {
+                let _guard = mgr.op_lock.lock();
+                mgr.run_stop(&app);
+            })
+            .ok();
+    }
+
+    pub fn restart_background(self: &Arc<Self>, app: AppHandle) {
+        let mgr = Arc::clone(self);
+        thread::Builder::new()
+            .name("gw-restart".into())
+            .spawn(move || {
+                let _guard = mgr.op_lock.lock();
+                mgr.run_stop(&app);
+                thread::sleep(Duration::from_millis(350));
+                mgr.run_start(&app);
+            })
+            .ok();
+    }
+
+    pub fn check_now(&self, app: &AppHandle) -> ActionResult {
+        emit_log(app, "INFO", "▶ 接口检查");
+        let st = self.refresh_full();
+        let mut logs: Vec<String> = Vec::new();
+        if !st.healthy {
+            let msg = "健康检查失败：本地网关不可达".to_string();
+            emit_log(app, "ERR", &msg);
+            logs.push(msg);
+            emit_status(app, &st);
+            return ActionResult {
+                ok: false,
+                message: "not reachable".to_string(),
+                logs,
+                status: st,
+            };
+        }
+        let missing: Vec<&str> = REQUIRED_ROUTES
+            .iter()
+            .copied()
+            .filter(|r| !st.routes.iter().any(|x| x == *r))
+            .collect();
+        if !missing.is_empty() {
+            let msg = format!("缺少路由: {}", missing.join(", "));
+            emit_log(app, "ERR", &msg);
+            logs.push(msg);
+            emit_status(app, &st);
+            return ActionResult {
+                ok: false,
+                message: "missing routes".to_string(),
+                logs,
+                status: st,
+            };
+        }
+        logs.push(format!("Gateway OK: {ENDPOINT}"));
+        logs.push(format!("路由: {}", st.routes.join(", ")));
+        for l in &logs {
+            emit_log(app, "OK", l);
+        }
+        emit_status(app, &st);
+        ActionResult {
             ok: true,
-            message: "Gateway is already running".into(),
+            message: "ok".to_string(),
             logs,
-            status: status_full(),
-        };
-    }
-    if current.healthy && !current.is_our_gateway {
-        logs.push("端口 4000 已被其他服务占用，拒绝启动。".into());
-        return ActionResult {
-            ok: false,
-            message: "Port 4000 is occupied by another service".into(),
-            logs,
-            status: current,
-        };
+            status: st,
+        }
     }
 
-    let store = match read_store() {
-        Ok(s) => s,
-        Err(e) => {
-            logs.push(e.clone());
-            return ActionResult {
-                ok: false,
-                message: e,
-                logs,
-                status: status_full(),
-            };
+    fn run_start(&self, app: &AppHandle) {
+        {
+            let mut g = self.inner.write();
+            g.status.busy = true;
+            g.status.phase = GatewayPhase::Starting;
+            g.status.message = "正在启动…".into();
         }
-    };
-    let Some(profile) = default_profile(&store) else {
-        let msg = "尚未配置默认模型，请先添加模型".to_string();
-        logs.push(msg.clone());
-        return ActionResult {
-            ok: false,
-            message: msg,
-            logs,
-            status: status_full(),
-        };
-    };
+        emit_status(app, &self.snapshot());
+        emit_log(app, "INFO", "▶ 启动网关");
 
-    let python = match python_runtime(&root) {
-        Some(p) => p,
-        None => {
-            let msg = "缺少 Python 运行时。请使用便携版或执行开发安装。".to_string();
-            logs.push(msg.clone());
-            return ActionResult {
-                ok: false,
-                message: msg,
-                logs,
-                status: status_full(),
-            };
-        }
-    };
-    let runner = run_gateway_py(&root);
-    let config = config_yaml(&root);
-    if !runner.is_file() || !config.is_file() {
-        let msg = "缺少 run_gateway.py 或 config.yaml".to_string();
-        logs.push(msg.clone());
-        return ActionResult {
-            ok: false,
-            message: msg,
-            logs,
-            status: status_full(),
-        };
-    }
+        let root = project_root();
+        emit_log(app, "DIM", &format!("项目目录: {}", root.display()));
 
-    let log_dir = logs_dir(&root);
-    let _ = fs::create_dir_all(&log_dir);
-    let _ = fs::create_dir_all(root.join(".gateway"));
-    let stdout_path = log_dir.join("gateway.stdout.log");
-    let stderr_path = log_dir.join("gateway.stderr.log");
-
-    let stdout_file = match fs::File::create(&stdout_path) {
-        Ok(f) => f,
-        Err(e) => {
-            let msg = format!("无法创建日志: {e}");
-            logs.push(msg.clone());
-            return ActionResult {
-                ok: false,
-                message: msg,
-                logs,
-                status: status_full(),
-            };
-        }
-    };
-    let stderr_file = match fs::File::create(&stderr_path) {
-        Ok(f) => f,
-        Err(e) => {
-            let msg = format!("无法创建日志: {e}");
-            logs.push(msg.clone());
-            return ActionResult {
-                ok: false,
-                message: msg,
-                logs,
-                status: status_full(),
-            };
-        }
-    };
-
-    let mut cmd = Command::new(&python);
-    cmd.arg(&runner)
-        .arg("--config")
-        .arg(&config)
-        .arg("--host")
-        .arg(GATEWAY_HOST)
-        .arg("--port")
-        .arg(GATEWAY_PORT.to_string())
-        .current_dir(&root)
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
-        .env("UPSTREAM_MODEL", &profile.litellm_model)
-        .env(
-            "CLAUDE_UPSTREAM_MODEL",
-            claude_litellm_model(&profile.litellm_model),
-        )
-        .env("UPSTREAM_BASE_URL", &profile.base_url)
-        .env("UPSTREAM_API_KEY", &profile.api_key)
-        .env("GATEWAY_HOST", GATEWAY_HOST)
-        .env("GATEWAY_PORT", GATEWAY_PORT.to_string());
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            let msg = format!("启动失败: {e}");
-            logs.push(msg.clone());
-            return ActionResult {
-                ok: false,
-                message: msg,
-                logs,
-                status: status_full(),
-            };
-        }
-    };
-
-    let pid = child.id();
-    logs.push(format!("已启动进程 PID {pid}"));
-    let started_at = Utc::now().to_rfc3339();
-    let state = GatewayStateFile {
-        pid,
-        executable: python.to_string_lossy().to_string(),
-        runner: runner.to_string_lossy().to_string(),
-        endpoint: ENDPOINT.into(),
-        model: profile.litellm_model.clone(),
-        started_at: started_at.clone(),
-    };
-    if let Err(e) = write_state_file(&root, &state) {
-        logs.push(format!("写入 state 失败: {e}"));
-    }
-
-    // Wait for readiness + identity
-    let mut ready = false;
-    for attempt in 0..40 {
-        thread::sleep(Duration::from_millis(500));
-        // If process already dead, break
-        if !pid_alive(pid) {
-            logs.push(format!("进程在就绪前退出（尝试 {attempt}）"));
-            break;
-        }
-        if health_alive_ms(800) {
+        // Already healthy?
+        if health_probe(400) {
             let routes = list_routes().unwrap_or_default();
             if is_our_gateway(&routes) {
-                ready = true;
+                let _ = ensure_state_for_running(&root);
+                {
+                    let mut g = self.inner.write();
+                    g.status.busy = false;
+                    g.status.phase = GatewayPhase::Running;
+                    g.status.healthy = true;
+                    g.status.running = true;
+                    g.status.is_our_gateway = true;
+                    g.status.routes = routes;
+                    g.status.message = "网关已在运行".into();
+                    if let Some(file) = read_state_file(&root) {
+                        g.status.pid = Some(file.pid);
+                        g.status.model = Some(file.model);
+                        g.status.started_at = Some(file.started_at);
+                    }
+                }
+                emit_log(app, "OK", "网关已在运行，已同步状态");
+                emit_status(app, &self.snapshot());
+                emit_action(app, true, "Gateway already running");
+                return;
+            }
+            {
+                let mut g = self.inner.write();
+                g.status.busy = false;
+                g.status.phase = GatewayPhase::Error;
+                g.status.healthy = true;
+                g.status.running = true;
+                g.status.is_our_gateway = false;
+                g.status.message = "端口 4000 被其他服务占用".into();
+            }
+            emit_log(app, "ERR", "端口 4000 被其他服务占用，拒绝启动");
+            emit_status(app, &self.snapshot());
+            emit_action(app, false, "port occupied");
+            return;
+        }
+
+        let store = match read_store() {
+            Ok(s) => s,
+            Err(e) => {
+                self.fail_start(app, &e);
+                return;
+            }
+        };
+        let Some(profile) = default_profile(&store).cloned() else {
+            self.fail_start(app, "尚未配置默认模型，请先添加模型");
+            return;
+        };
+        let Some(python) = python_runtime(&root) else {
+            self.fail_start(app, "缺少 Python 运行时（runtime/ 或 .venv）");
+            return;
+        };
+        let runner = run_gateway_py(&root);
+        let config = config_yaml(&root);
+        if !runner.is_file() || !config.is_file() {
+            self.fail_start(app, "缺少 run_gateway.py 或 config.yaml");
+            return;
+        }
+
+        let log_dir = logs_dir(&root);
+        let _ = fs::create_dir_all(&log_dir);
+        let _ = fs::create_dir_all(root.join(".gateway"));
+        let stdout_path = log_dir.join("gateway.stdout.log");
+        let stderr_path = log_dir.join("gateway.stderr.log");
+        let stdout_file = match fs::File::create(&stdout_path) {
+            Ok(f) => f,
+            Err(e) => {
+                self.fail_start(app, &format!("无法创建日志: {e}"));
+                return;
+            }
+        };
+        let stderr_file = match fs::File::create(&stderr_path) {
+            Ok(f) => f,
+            Err(e) => {
+                self.fail_start(app, &format!("无法创建日志: {e}"));
+                return;
+            }
+        };
+
+        let mut cmd = Command::new(&python);
+        cmd.arg(&runner)
+            .arg("--config")
+            .arg(&config)
+            .arg("--host")
+            .arg(GATEWAY_HOST)
+            .arg("--port")
+            .arg(GATEWAY_PORT.to_string())
+            .current_dir(&root)
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
+            .env("UPSTREAM_MODEL", &profile.litellm_model)
+            .env(
+                "CLAUDE_UPSTREAM_MODEL",
+                claude_litellm_model(&profile.litellm_model),
+            )
+            .env("UPSTREAM_BASE_URL", &profile.base_url)
+            .env("UPSTREAM_API_KEY", &profile.api_key)
+            .env("GATEWAY_HOST", GATEWAY_HOST)
+            .env("GATEWAY_PORT", GATEWAY_PORT.to_string());
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                self.fail_start(app, &format!("启动失败: {e}"));
+                return;
+            }
+        };
+
+        let pid = child.id();
+        let started_at = Utc::now().to_rfc3339();
+        emit_log(app, "DIM", &format!("已启动进程 PID {pid}"));
+
+        let state = GatewayStateFile {
+            pid,
+            executable: python.to_string_lossy().to_string(),
+            runner: runner.to_string_lossy().to_string(),
+            endpoint: ENDPOINT.into(),
+            model: profile.litellm_model.clone(),
+            started_at: started_at.clone(),
+        };
+        if let Err(e) = write_state_file(&root, &state) {
+            emit_log(app, "ERR", &format!("写入 state 失败: {e}"));
+        }
+
+        {
+            let mut g = self.inner.write();
+            g.child = Some(child);
+            g.status.pid = Some(pid);
+            g.status.model = Some(profile.litellm_model.clone());
+            g.status.started_at = Some(started_at);
+            g.status.default_model_name = Some(profile.name.clone());
+            g.default_name = Some(profile.name.clone());
+        }
+        emit_status(app, &self.snapshot());
+
+        // Wait for readiness without blocking UI (we're already on worker thread)
+        let mut ready = false;
+        for attempt in 0..50 {
+            thread::sleep(Duration::from_millis(200));
+            if !pid_alive(pid) {
+                emit_log(app, "ERR", &format!("进程在就绪前退出（attempt {attempt}）"));
                 break;
             }
-        }
-    }
-
-    if !ready {
-        let _ = kill_pid(pid);
-        let _ = fs::remove_file(state_path(&root));
-        logs.push("网关未能在时限内就绪，已回滚。详见 logs/gateway.stderr.log".into());
-        return ActionResult {
-            ok: false,
-            message: "Gateway failed to become ready".into(),
-            logs,
-            status: status_full(),
-        };
-    }
-
-    logs.push(format!(
-        "网关已启动: {ENDPOINT_V1} · 默认模型 {} ({})",
-        profile.name, profile.litellm_model
-    ));
-    ActionResult {
-        ok: true,
-        message: "Gateway started".into(),
-        logs,
-        status: status_full(),
-    }
-}
-
-pub fn stop_gateway() -> ActionResult {
-    let mut logs = Vec::new();
-    let root = project_root();
-    let mut killed = Vec::new();
-
-    // 1) Prefer recorded state
-    if let Some(st) = read_state_file(&root) {
-        if process_matches(&root, st.pid, &st.executable, &st.runner) {
-            if kill_pid(st.pid) {
-                logs.push(format!("已停止 state 记录的 PID {}", st.pid));
-                killed.push(st.pid);
-            } else {
-                logs.push(format!("无法停止 PID {}", st.pid));
+            if health_probe(300) {
+                let routes = list_routes().unwrap_or_default();
+                if is_our_gateway(&routes) {
+                    ready = true;
+                    let mut g = self.inner.write();
+                    g.status.routes = routes;
+                    break;
+                }
             }
+        }
+
+        if !ready {
+            let _ = kill_pid(pid);
+            let _ = fs::remove_file(state_path(&root));
+            {
+                let mut g = self.inner.write();
+                g.child = None;
+                g.status.busy = false;
+                g.status.phase = GatewayPhase::Error;
+                g.status.running = false;
+                g.status.healthy = false;
+                g.status.pid = None;
+                g.status.message = "启动失败，见 logs/gateway.stderr.log".into();
+            }
+            emit_log(app, "ERR", "网关未能就绪，已回滚");
+            emit_status(app, &self.snapshot());
+            emit_action(app, false, "start failed");
+            return;
+        }
+
+        {
+            let mut g = self.inner.write();
+            g.status.busy = false;
+            g.status.phase = GatewayPhase::Running;
+            g.status.running = true;
+            g.status.healthy = true;
+            g.status.is_our_gateway = true;
+            g.status.message = format!(
+                "运行中 · {} ({})",
+                profile.name, profile.litellm_model
+            );
+        }
+        emit_log(
+            app,
+            "OK",
+            &format!(
+                "网关已启动 {ENDPOINT_V1} · {} ({})",
+                profile.name, profile.litellm_model
+            ),
+        );
+        emit_status(app, &self.snapshot());
+        emit_action(app, true, "Gateway started");
+    }
+
+    fn fail_start(&self, app: &AppHandle, msg: &str) {
+        {
+            let mut g = self.inner.write();
+            g.status.busy = false;
+            g.status.phase = GatewayPhase::Error;
+            g.status.message = msg.into();
+        }
+        emit_log(app, "ERR", msg);
+        emit_status(app, &self.snapshot());
+        emit_action(app, false, msg);
+    }
+
+    fn run_stop(&self, app: &AppHandle) {
+        {
+            let mut g = self.inner.write();
+            g.status.busy = true;
+            g.status.phase = GatewayPhase::Stopping;
+            g.status.message = "正在停止…".into();
+        }
+        emit_status(app, &self.snapshot());
+        emit_log(app, "INFO", "▶ 停止网关");
+
+        let root = project_root();
+        let mut killed = Vec::new();
+
+        // Drop owned child first
+        {
+            let mut g = self.inner.write();
+            if let Some(mut child) = g.child.take() {
+                let pid = child.id();
+                let _ = child.kill();
+                let _ = child.wait();
+                killed.push(pid);
+                emit_log(app, "DIM", &format!("已停止会话子进程 PID {pid}"));
+            }
+        }
+
+        if let Some(st) = read_state_file(&root) {
+            if pid_alive(st.pid) && !killed.contains(&st.pid) {
+                if kill_pid(st.pid) {
+                    emit_log(app, "DIM", &format!("已停止 state PID {}", st.pid));
+                    killed.push(st.pid);
+                }
+            }
+        }
+
+        for pid in find_all_gateway_pids(&root) {
+            if killed.contains(&pid) {
+                continue;
+            }
+            if kill_pid(pid) {
+                emit_log(app, "DIM", &format!("已停止发现的网关进程 PID {pid}"));
+                killed.push(pid);
+            }
+        }
+
+        let _ = fs::remove_file(state_path(&root));
+        thread::sleep(Duration::from_millis(250));
+
+        let still = health_probe(400);
+        {
+            let mut g = self.inner.write();
+            g.status.busy = false;
+            g.status.pid = None;
+            g.status.started_at = None;
+            g.status.uptime = None;
+            g.status.routes.clear();
+            if still {
+                g.status.phase = GatewayPhase::Error;
+                g.status.running = true;
+                g.status.healthy = true;
+                g.status.message = "停止后端口仍有响应".into();
+            } else {
+                g.status.phase = GatewayPhase::Stopped;
+                g.status.running = false;
+                g.status.healthy = false;
+                g.status.is_our_gateway = false;
+                g.status.message = "网关已停止".into();
+            }
+        }
+
+        if still {
+            emit_log(app, "ERR", "停止后健康检查仍通过");
+            emit_status(app, &self.snapshot());
+            emit_action(app, false, "still running");
         } else {
-            logs.push("state 中的 PID 已失效或不是本网关进程".into());
-        }
-    } else {
-        logs.push("无 state.json，尝试按进程特征查找…".into());
-    }
-
-    // 2) Fallback: scan for run_gateway.py belonging to this project
-    for pid in find_all_gateway_pids(&root) {
-        if killed.contains(&pid) {
-            continue;
-        }
-        if kill_pid(pid) {
-            logs.push(format!("已停止发现的网关进程 PID {pid}"));
-            killed.push(pid);
+            emit_log(app, "OK", "网关已停止");
+            emit_status(app, &self.snapshot());
+            emit_action(app, true, "Gateway stopped");
         }
     }
 
-    let _ = fs::remove_file(state_path(&root));
-
-    // 3) If something still healthy on port and ours, report failure
-    thread::sleep(Duration::from_millis(300));
-    let st = status_full();
-    if st.healthy && st.is_our_gateway {
-        logs.push("停止后健康检查仍通过，可能有未识别的残留进程".into());
-        return ActionResult {
-            ok: false,
-            message: "Gateway still responding after stop attempts".into(),
-            logs,
-            status: st,
-        };
-    }
-
-    if killed.is_empty() && !st.running {
-        logs.push("网关已停止（无活动进程）".into());
-    }
-
-    ActionResult {
-        ok: true,
-        message: "Gateway stopped".into(),
-        logs,
-        status: status_full(),
+    /// Background watcher: cheap probes + push events only on change.
+    pub fn start_watcher(self: &Arc<Self>, app: AppHandle) {
+        if self
+            .watcher_started
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        let mgr = Arc::clone(self);
+        thread::Builder::new()
+            .name("gw-watch".into())
+            .spawn(move || {
+                let mut last_sig = String::new();
+                loop {
+                    thread::sleep(Duration::from_secs(2));
+                    let st = mgr.refresh_light();
+                    let sig = format!(
+                        "{:?}|{}|{}|{:?}|{}",
+                        st.phase, st.healthy, st.running, st.pid, st.message
+                    );
+                    if sig != last_sig {
+                        last_sig = sig;
+                        emit_status(&app, &st);
+                    }
+                }
+            })
+            .ok();
     }
 }
 
-pub fn restart_gateway() -> ActionResult {
-    let mut logs = Vec::new();
-    let stop = stop_gateway();
-    logs.extend(stop.logs);
-    // brief pause so port releases
-    thread::sleep(Duration::from_millis(400));
-    let start = start_gateway();
-    logs.extend(start.logs);
-    ActionResult {
-        ok: start.ok,
-        message: if start.ok {
-            "Gateway restarted".into()
-        } else {
-            start.message
+fn emit_status(app: &AppHandle, status: &GatewayStatus) {
+    let _ = app.emit("gateway://status", status);
+}
+
+fn emit_log(app: &AppHandle, level: &str, message: &str) {
+    let _ = app.emit(
+        "gateway://log",
+        LogEvent {
+            level: level.into(),
+            message: message.into(),
         },
-        logs,
-        status: start.status,
-    }
+    );
 }
 
-pub fn check_gateway() -> ActionResult {
-    let mut logs = Vec::new();
-    let st = status_full();
-    if !st.healthy {
-        logs.push("健康检查失败：本地网关不可达".into());
-        return ActionResult {
-            ok: false,
-            message: "not reachable".into(),
-            logs,
-            status: st,
-        };
-    }
-    let missing: Vec<&str> = REQUIRED_ROUTES
-        .iter()
-        .copied()
-        .filter(|r| !st.routes.iter().any(|x| x == *r))
-        .collect();
-    if !missing.is_empty() {
-        logs.push(format!("缺少路由: {}", missing.join(", ")));
-        return ActionResult {
-            ok: false,
-            message: "missing routes".into(),
-            logs,
-            status: st,
-        };
-    }
-    if !st.is_our_gateway {
-        logs.push("响应存在但身份校验未通过".into());
-        return ActionResult {
-            ok: false,
-            message: "identity check failed".into(),
-            logs,
-            status: st,
-        };
-    }
-    logs.push(format!("Gateway OK: {ENDPOINT}"));
-    logs.push(format!("路由: {}", st.routes.join(", ")));
-    ActionResult {
-        ok: true,
-        message: "ok".into(),
-        logs,
-        status: st,
-    }
+fn emit_action(app: &AppHandle, ok: bool, message: &str) {
+    let _ = app.emit(
+        "gateway://action",
+        serde_json::json!({ "ok": ok, "message": message }),
+    );
 }
 
-fn health_alive_ms(timeout_ms: u64) -> bool {
+fn health_probe(timeout_ms: u64) -> bool {
+    // Plain HTTP to localhost — no TLS stack needed
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_millis(timeout_ms))
         .build();
@@ -495,7 +761,7 @@ fn health_alive_ms(timeout_ms: u64) -> bool {
 
 fn list_routes() -> Result<Vec<String>, String> {
     let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(3))
         .build();
     let resp = agent
         .get(&format!("{ENDPOINT_V1}/models"))
@@ -536,10 +802,9 @@ fn write_state_file(root: &Path, state: &GatewayStateFile) -> Result<(), String>
     fs::rename(tmp, path).map_err(|e| e.to_string())
 }
 
-fn ensure_state_for_running(root: &Path, logs: &mut Vec<String>) -> Result<(), String> {
+fn ensure_state_for_running(root: &Path) -> Result<(), String> {
     if let Some(st) = read_state_file(root) {
-        if process_matches(root, st.pid, &st.executable, &st.runner) {
-            logs.push(format!("state 有效 PID {}", st.pid));
+        if pid_alive(st.pid) {
             return Ok(());
         }
     }
@@ -552,66 +817,17 @@ fn ensure_state_for_running(root: &Path, logs: &mut Vec<String>) -> Result<(), S
         .ok()
         .and_then(|s| default_profile(&s).map(|p| p.litellm_model.clone()))
         .unwrap_or_default();
-    let state = GatewayStateFile {
-        pid,
-        executable: python,
-        runner,
-        endpoint: ENDPOINT.into(),
-        model,
-        started_at: Utc::now().to_rfc3339(),
-    };
-    write_state_file(root, &state)?;
-    logs.push(format!("已补写 state.json → PID {pid}"));
-    Ok(())
-}
-
-fn process_matches(root: &Path, pid: u32, expected_exe: &str, expected_runner: &str) -> bool {
-    let mut sys = System::new();
-    let handle = sysinfo::Pid::from_u32(pid);
-    sys.refresh_processes(ProcessesToUpdate::Some(&[handle]), true);
-    let Some(proc) = sys.process(handle) else {
-        return false;
-    };
-    let exe = proc
-        .exe()
-        .map(|p| normalize_path(p))
-        .unwrap_or_default();
-    let expected = normalize_path(Path::new(expected_exe));
-    if !exe.is_empty() && !expected.is_empty() && exe != expected {
-        // allow python.exe vs pythonw.exe mismatch for same runtime dir
-        let exe_stem = Path::new(&exe)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let exp_stem = Path::new(&expected)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let both_python = exe_stem.starts_with("python") && exp_stem.starts_with("python");
-        if !both_python {
-            return false;
-        }
-        // same directory preferred
-        let exe_dir = Path::new(&exe).parent().map(|p| normalize_path(p));
-        let exp_dir = Path::new(&expected).parent().map(|p| normalize_path(p));
-        if exe_dir != exp_dir {
-            // still accept if cmd contains our runner
-        }
-    }
-    let runner_name = Path::new(expected_runner)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("run_gateway.py");
-    let cmd = proc
-        .cmd()
-        .iter()
-        .map(|s| s.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let root_s = normalize_path(root);
-    cmd.contains(runner_name) && (cmd.contains(&root_s) || cmd.contains("run_gateway.py"))
+    write_state_file(
+        root,
+        &GatewayStateFile {
+            pid,
+            executable: python,
+            runner,
+            endpoint: ENDPOINT.into(),
+            model,
+            started_at: Utc::now().to_rfc3339(),
+        },
+    )
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -640,7 +856,6 @@ fn find_all_gateway_pids(root: &Path) -> Vec<u32> {
     sys.refresh_processes(ProcessesToUpdate::All, true);
     let runner = run_gateway_py(root);
     let runner_s = normalize_path(&runner);
-    let runner_name = "run_gateway.py";
     let root_s = normalize_path(root);
     let mut pids = Vec::new();
     for (pid, proc) in sys.processes() {
@@ -650,15 +865,11 @@ fn find_all_gateway_pids(root: &Path) -> Vec<u32> {
             .map(|s| s.to_string_lossy().to_string())
             .collect::<Vec<_>>()
             .join(" ");
-        if !cmd.contains(runner_name) {
+        if !cmd.contains("run_gateway.py") {
             continue;
         }
-        // Prefer exact project path match; also accept absolute runner path
-        if cmd.contains(&root_s) || cmd.contains(&runner_s) || cmd.contains("run_gateway.py") {
-            // Avoid matching unrelated projects: require root path if possible
-            if cmd.contains(&root_s) || cmd.contains(&runner_s) {
-                pids.push(pid.as_u32());
-            }
+        if cmd.contains(&root_s) || cmd.contains(&runner_s) {
+            pids.push(pid.as_u32());
         }
     }
     pids
@@ -676,12 +887,7 @@ fn normalize_path(path: &Path) -> String {
 fn format_uptime(started_at: &str) -> Option<String> {
     let started = DateTime::parse_from_rfc3339(started_at)
         .ok()
-        .map(|d| d.with_timezone(&Local))
-        .or_else(|| {
-            DateTime::parse_from_rfc3339(started_at)
-                .ok()
-                .map(|d| d.with_timezone(&Local))
-        })?;
+        .map(|d| d.with_timezone(&Local))?;
     let span = Local::now().signed_duration_since(started);
     let secs = span.num_seconds();
     if secs < 0 {
@@ -696,7 +902,11 @@ fn format_uptime(started_at: &str) -> Option<String> {
     if secs < 86400 {
         return Some(format!("{} 小时 {} 分", secs / 3600, (secs % 3600) / 60));
     }
-    Some(format!("{} 天 {} 小时", secs / 86400, (secs % 86400) / 3600))
+    Some(format!(
+        "{} 天 {} 小时",
+        secs / 86400,
+        (secs % 86400) / 3600
+    ))
 }
 
 pub fn open_logs_folder() -> Result<String, String> {
@@ -718,8 +928,7 @@ pub fn read_version() -> String {
 }
 
 pub fn autostart_enabled() -> bool {
-    let startup = dirs_startup();
-    startup
+    dirs_startup()
         .map(|p| p.join("Codex Chat Gateway.lnk").is_file())
         .unwrap_or(false)
 }
@@ -755,7 +964,7 @@ pub fn run_project_script(name: &str) -> Result<ActionResult, String> {
             format!("{name} 失败（退出码 {code}）")
         },
         logs,
-        status: status_full(),
+        status: GatewayStatus::default(),
     })
 }
 
@@ -800,7 +1009,9 @@ fn run_ps_script_raw(script: &Path) -> Result<(i32, String, String), String> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let output = cmd.output().map_err(|e| format!("无法启动 PowerShell: {e}"))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("无法启动 PowerShell: {e}"))?;
     let code = output.status.code().unwrap_or(-1);
     let out = String::from_utf8_lossy(&output.stdout).to_string();
     let err = String::from_utf8_lossy(&output.stderr).to_string();
@@ -808,7 +1019,6 @@ fn run_ps_script_raw(script: &Path) -> Result<(i32, String, String), String> {
 }
 
 fn dirs_startup() -> Option<PathBuf> {
-    // %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
     let appdata = std::env::var_os("APPDATA")?;
     Some(
         PathBuf::from(appdata)

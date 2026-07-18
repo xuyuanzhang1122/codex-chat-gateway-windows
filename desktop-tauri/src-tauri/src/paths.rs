@@ -1,11 +1,18 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-/// Resolve the gateway project root (directory containing config.yaml + scripts/).
+static ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Resolve once and cache the gateway project root (config.yaml + scripts/).
 pub fn project_root() -> PathBuf {
+    ROOT.get_or_init(discover_root).clone()
+}
+
+fn discover_root() -> PathBuf {
     if let Ok(explicit) = std::env::var("CODEX_CHAT_GATEWAY_ROOT") {
         let p = PathBuf::from(explicit);
         if is_project_root(&p) {
-            return p;
+            return canonicalize(&p);
         }
     }
 
@@ -26,7 +33,6 @@ pub fn project_root() -> PathBuf {
         candidates.push(cwd.join("../.."));
     }
 
-    // Dev: desktop-tauri/src-tauri -> repo root
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
         let m = PathBuf::from(manifest);
         candidates.push(m.join("../.."));
@@ -34,16 +40,21 @@ pub fn project_root() -> PathBuf {
     }
 
     for c in candidates {
+        if is_project_root(&c) {
+            return canonicalize(&c);
+        }
         if let Ok(resolved) = c.canonicalize() {
             if is_project_root(&resolved) {
                 return resolved;
             }
-        } else if is_project_root(&c) {
-            return c;
         }
     }
 
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn canonicalize(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn is_project_root(path: &Path) -> bool {
@@ -71,22 +82,16 @@ pub fn run_gateway_py(root: &Path) -> PathBuf {
 }
 
 pub fn python_runtime(root: &Path) -> Option<PathBuf> {
-    let portable = root.join("runtime").join("pythonw.exe");
-    if portable.is_file() {
-        return Some(portable);
-    }
-    let venv = root.join(".venv").join("Scripts").join("pythonw.exe");
-    if venv.is_file() {
-        return Some(venv);
-    }
-    let portable_console = root.join("runtime").join("python.exe");
-    if portable_console.is_file() {
-        return Some(portable_console);
-    }
-    let venv_console = root.join(".venv").join("Scripts").join("python.exe");
-    if venv_console.is_file() {
-        return Some(venv_console);
+    for rel in [
+        "runtime/pythonw.exe",
+        ".venv/Scripts/pythonw.exe",
+        "runtime/python.exe",
+        ".venv/Scripts/python.exe",
+    ] {
+        let p = root.join(rel);
+        if p.is_file() {
+            return Some(p);
+        }
     }
     None
 }
-

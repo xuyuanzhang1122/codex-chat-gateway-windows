@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- 新增基于 **Tauri 2 + React** 的桌面控制台（`desktop-tauri/`），视觉风格参考 Mineradio（启动入场、粒子场、玻璃卡片、薄荷高亮）。
-- Tauri 版在 Rust 侧重写网关启停：无 state 时按进程命令行回退停止、`/v1/models` 身份校验、端口占用识别、运行中补写 state。
-- Tauri 版修复交互问题：恢复配置二次确认、改默认/当前模型后提示重启、剪贴板失败不崩 UI。
+- 新增 **Tauri 2 + React + LobeHub UI** 桌面控制台（`desktop-tauri/`）：无边框窗口、SideNav、Block/Modal/Form/Snippet 等组件，弃用旧 WPF 与原生丑控件。
+- Rust `GatewayManager`：原生进程生命周期、状态缓存、异步启停 worker、`gateway://*` 事件推送，避免切页/启动卡顿。
+- 应用内与 README 署名：GitHub `xuyuanzhang1122/codex-chat-gateway-windows`、LobeHub UI、LiteLLM。
+- 网关启停修复：无 state 回退杀进程、路由身份校验、端口占用拒绝、运行中补写 state；恢复配置确认、改模型提示重启。
 - 新增品牌化深色 Windows 安装包：中英文界面、用户级安装、快捷方式/登录自启选项及可选择的数据清理卸载流程。
 - 桌面控制台改为自适应 WPF 界面，新增高 DPI 支持、玻璃卡片和可交互粒子背景。
 - 新增网关重启、PID/运行时长/当前模型状态、实时脚本输出与登录自启状态开关。

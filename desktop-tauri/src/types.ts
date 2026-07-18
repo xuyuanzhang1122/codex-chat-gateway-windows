@@ -20,7 +20,10 @@ export interface ModelInput {
   model_id: string;
 }
 
+export type GatewayPhase = "stopped" | "starting" | "running" | "stopping" | "error";
+
 export interface GatewayStatus {
+  phase: GatewayPhase;
   running: boolean;
   healthy: boolean;
   is_our_gateway: boolean;
@@ -32,6 +35,7 @@ export interface GatewayStatus {
   default_model_name: string | null;
   message: string;
   routes: string[];
+  busy: boolean;
 }
 
 export interface ActionResult {
@@ -46,6 +50,14 @@ export interface ProjectInfo {
   version: string;
   endpoint: string;
   autostart: boolean;
+  github: string;
+  credits: {
+    project: string;
+    repository: string;
+    owner: string;
+    ui_kit: string;
+    ui_kit_name: string;
+  };
 }
 
 export type LogLevel = "INFO" | "OK" | "ERR" | "DIM";

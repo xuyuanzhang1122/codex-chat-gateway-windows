@@ -1,0 +1,148 @@
+/* Shell-only styles for frameless Tauri window. Component chrome comes from LobeHub UI. */
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.app-shell {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-rows: 40px 1fr;
+  background: var(--lobe-color-bg-layout, #000);
+}
+
+.titlebar {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  height: 40px;
+  padding: 0 4px 0 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 20;
+}
+
+.titlebar-drag {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 100%;
+  min-width: 0;
+}
+
+.titlebar-logo {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+}
+
+.win-controls {
+  display: flex;
+  height: 100%;
+}
+
+.win-btn {
+  width: 46px;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.win-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.win-btn.close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+.workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 72px 1fr;
+}
+
+.workspace-main {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 24px 16px;
+}
+
+.credit-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  padding-top: 12px;
+  margin-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.credit-bar a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.credit-bar a:hover {
+  text-decoration: underline;
+}
+
+.splash {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(ellipse at 50% 30%, rgba(88, 64, 200, 0.22), #000 60%);
+  transition: opacity 0.4s ease, visibility 0.4s ease;
+}
+
+.splash.exit {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.log-scroll {
+  max-height: min(52vh, 480px);
+  overflow: auto;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 10px 12px;
+  font-family: ui-monospace, Cascadia Code, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  user-select: text;
+}
+
+.log-line {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 8px;
+  padding: 1px 0;
+}
+
+/* Reduce paint cost while switching pages */
+.page-pane {
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 600px;
+}

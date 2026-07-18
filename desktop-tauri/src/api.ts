@@ -18,12 +18,12 @@ export const api = {
   makeDefault: (id: string) => invoke<ModelStore>("make_default", { id }),
   fetchModels: (baseUrl: string, apiKey: string) =>
     invoke<string[]>("fetch_models", { baseUrl, apiKey }),
-  start: () => invoke<ActionResult>("gateway_start"),
-  stop: () => invoke<ActionResult>("gateway_stop"),
-  restart: () => invoke<ActionResult>("gateway_restart"),
+  /** Fire-and-forget — progress via gateway:// events */
+  start: () => invoke<void>("gateway_start"),
+  stop: () => invoke<void>("gateway_stop"),
+  restart: () => invoke<void>("gateway_restart"),
   check: () => invoke<ActionResult>("gateway_check"),
   logsDir: () => invoke<string>("get_logs_dir"),
-  toggleAutostart: (enable: boolean) =>
-    invoke<string>("toggle_autostart", { enable }),
+  toggleAutostart: (enable: boolean) => invoke<string>("toggle_autostart", { enable }),
   runScript: (name: string) => invoke<ActionResult>("run_script", { name }),
 };
