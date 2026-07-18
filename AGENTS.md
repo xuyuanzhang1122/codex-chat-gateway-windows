@@ -12,3 +12,5 @@
 - Claude Desktop 配置必须使用本项目独立 Profile ID，保留其他 Profile 和无关字段；恢复时只移除本项目 Profile 并切回官方 `1p` 模式。
 - 如果当前 Claude Desktop 版本不再支持已验证的 3P Profile 结构，应暂停并明确报告暂不支持，不得绕过应用校验。
 - 升级 LiteLLM 前核对 `/responses`、流式输出及工具调用兼容性并完成冒烟测试。
+- 新桌面控制台优先维护 `desktop-tauri/`（Tauri 2 + React）；网关仍只监听 `127.0.0.1`，密钥不得写入前端静态资源或客户端配置。
+- 旧版 WPF（`desktop/GatewayDesktop.cs` / `CodexChatGateway.exe`）在 Tauri 版稳定前可并存，勿在未确认分发策略前删除。

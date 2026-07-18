@@ -12,3 +12,7 @@ runtime/
 CodexChatGateway.exe
 desktop/*.exe
 desktop/assets/*-chroma.png
+.firecrawl/
+desktop-tauri/node_modules/
+desktop-tauri/dist/
+desktop-tauri/src-tauri/target/
