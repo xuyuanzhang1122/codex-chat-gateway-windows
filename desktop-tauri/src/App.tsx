@@ -142,8 +142,6 @@ async function copyText(text: string): Promise<boolean> {
 }
 
 function App() {
-  const [splash, setSplash] = useState(true);
-  const [splashExit, setSplashExit] = useState(false);
   const [page, setPage] = useState<Page>("gateway");
   const [status, setStatus] = useState<GatewayStatus>(emptyStatus);
   const [store, setStore] = useState<ModelStore>({ version: 1, default_id: "", profiles: [] });
@@ -161,8 +159,6 @@ function App() {
   const pendingKey = useRef<ActionKey | null>(null);
   const feedbackTimer = useRef<number | null>(null);
   const autoUpdateChecked = useRef(false);
-  const ready = !splash;
-
   const confirm = useCallback(
     (opts: Omit<ConfirmRequest, "resolve">) =>
       new Promise<boolean>((resolve) => {
@@ -211,7 +207,6 @@ function App() {
 
   // Event-driven backend (no heavy polling loop)
   useEffect(() => {
-    if (!ready) return;
     let unsubs: Array<() => void> = [];
 
     void (async () => {
@@ -224,7 +219,7 @@ function App() {
         setStatus(st);
         setStore(models);
         setInfo(proj);
-        pushLog("INFO", "Studio 已就绪（事件驱动后端）");
+        pushLog("INFO", "Studio 已就绪");
         pushLog("DIM", proj.root);
       } catch (e) {
         pushLog("ERR", `初始化失败: ${String(e)}`);
@@ -321,12 +316,7 @@ function App() {
       for (const u of unsubs) u();
       if (feedbackTimer.current) window.clearTimeout(feedbackTimer.current);
     };
-  }, [ready, pushLog, showFeedback]);
-
-  const enter = () => {
-    setSplashExit(true);
-    window.setTimeout(() => setSplash(false), 380);
-  };
+  }, [pushLog, showFeedback]);
 
   const hasDefault = store.profiles.some((p) => p.id === store.default_id);
   const busy = status.busy || feedback?.state === "loading";
@@ -382,33 +372,13 @@ function App() {
 
   return (
     <>
-      {splash && (
-        <div className={`splash ${splashExit ? "exit" : ""}`}>
-          <Flexbox align="center" gap={16}>
-            <img src="/gateway-logo.png" width={88} height={88} alt="" />
-            <Text as="h1" fontSize={28} weight={700}>
-              Codex Chat Gateway
-            </Text>
-            <Text type="secondary" fontSize={12} style={{ letterSpacing: "0.2em" }}>
-              STUDIO CONSOLE
-            </Text>
-            <Button type="primary" size="large" glass shadow onClick={enter}>
-              进入控制台
-            </Button>
-            <Text type="secondary" fontSize={12}>
-              本地模型桥 · 密钥不出本机
-            </Text>
-          </Flexbox>
-        </div>
-      )}
-
       <div className="app-shell">
         <TitleBar />
         <div className="workspace">
           <SideNav
             avatar={<img src="/gateway-logo.png" width={32} height={32} alt="" style={{ borderRadius: 8 }} />}
             bottomActions={
-              <Tooltip title="GitHub 仓库">
+              <Tooltip title="GitHub">
                 <ActionIcon
                   icon={ExternalLink}
                   title="GitHub"

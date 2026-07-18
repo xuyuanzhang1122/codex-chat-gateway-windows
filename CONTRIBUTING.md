@@ -1,20 +1,27 @@
-# 参与贡献
+# Contributing
 
-欢迎通过 Issue 和 Pull Request 改进项目。
+Issues and PRs welcome.
 
-## 提交前检查
+## Before you commit
 
-1. 不得提交 API Key、`.env`、`.gateway`、日志或个人 Codex 配置。
-2. PowerShell 执行脚本必须保持纯 ASCII，兼容 Windows PowerShell 5.1。
-3. 修改 Responses/Chat 转换路径时，必须运行工具调用和恢复配置回归测试。
-4. 修改便携包内容时，确认没有加入安装器、测试目录或开发环境文件。
+1. Never commit API keys, `.env`, `.gateway`, logs, or personal Codex config.
+2. Keep PowerShell under `scripts/` pure ASCII (Windows PowerShell 5.1).
+3. Do not commit updater **private** keys (`TAURI_SIGNING_PRIVATE_KEY*`).
+4. Prefer editing `desktop-tauri/` for the console; leave legacy `desktop/` unless you intend to touch WPF.
+5. Launchers live in `bin/` — keep paths relative to the repo root (`..\scripts\`).
 
-## 本地验证
+## Local checks
 
 ```powershell
 .\.venv\Scripts\python.exe .\tests\test_tool_output_adjacency.py
 .\.venv\Scripts\python.exe .\tests\test_codex_restore.py
 ```
 
-发布构建由 `scripts/build-portable.ps1` 和 GitHub Actions 完成。创建 `vX.Y.Z`
-标签前，必须先同步更新 `VERSION`。
+```powershell
+cd desktop-tauri
+npm run build
+npm run tauri build -- --no-bundle
+```
+
+Bump `VERSION` (and Studio package versions) before tagging `vX.Y.Z`.  
+See [docs/STRUCTURE.md](docs/STRUCTURE.md) and [docs/RELEASE_AND_UPDATES.md](docs/RELEASE_AND_UPDATES.md).

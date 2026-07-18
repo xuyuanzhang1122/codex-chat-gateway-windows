@@ -2,14 +2,11 @@
 
 ## Unreleased
 
-- 新增 **Tauri 2 + React + LobeHub UI** 桌面控制台（`desktop-tauri/`）：无边框窗口、SideNav、Block/Modal/Form/Snippet 等组件，弃用旧 WPF 与原生丑控件。
-- Rust `GatewayManager`：原生进程生命周期、状态缓存、异步启停 worker、`gateway://*` 事件推送，避免切页/启动卡顿。
-- **关闭到托盘**：点 X / 关窗仅隐藏控制台，**不停止网关**；托盘可显示/隐藏/退出控制台。
-- **Studio 安装器** `scripts/build-tauri-installer.ps1` + `installer/CodexChatGateway-Studio.iss`：深色 Inno 安装包，可选**安装前卸载旧 C# 版**。
-- 应用内与 README 署名：GitHub `xuyuanzhang1122/codex-chat-gateway-windows`、LobeHub UI、LiteLLM。
-- 网关启停修复：无 state 回退杀进程、路由身份校验、端口占用拒绝、运行中补写 state；恢复配置确认、改模型提示重启。
-- **自动更新**：Tauri Updater + minisign；HTTPS GitHub `latest.json`；客户端页「检查更新」；启动静默探测；`scripts/build-updater-artifacts.ps1` / `generate-updater-keys.ps1`。
-- 文档 `docs/RELEASE_AND_UPDATES.md`：Release 与签名更新通道说明。
+- **Studio 控制台**（`desktop-tauri/`）：Tauri 2 + React + LobeHub；无边框、托盘关窗不杀网关；去掉多余启动闪屏。
+- Rust `GatewayManager`：进程生命周期、多进程停止（taskkill 树）、事件推送。
+- **Studio 安装器**与 **自动更新**（GitHub `latest.json` + minisign）。
+- 模型 **api.txt 导入**；托盘状态与窗口可见性同步。
+- 仓库整理：启动器迁入 `bin/`，示例进 `examples/`，文档进 `docs/`；README 与 Studio 截图更新。
 - 新增品牌化深色 Windows 安装包：中英文界面、用户级安装、快捷方式/登录自启选项及可选择的数据清理卸载流程。
 - 桌面控制台改为自适应 WPF 界面，新增高 DPI 支持、玻璃卡片和可交互粒子背景。
 - 新增网关重启、PID/运行时长/当前模型状态、实时脚本输出与登录自启状态开关。

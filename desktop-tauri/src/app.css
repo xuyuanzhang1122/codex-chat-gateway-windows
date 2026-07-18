@@ -117,22 +117,6 @@ body,
   text-decoration: underline;
 }
 
-.splash {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  display: grid;
-  place-items: center;
-  background: radial-gradient(ellipse at 50% 30%, rgba(88, 64, 200, 0.22), #000 60%);
-  transition: opacity 0.4s ease, visibility 0.4s ease;
-}
-
-.splash.exit {
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-}
-
 .log-scroll {
   max-height: min(52vh, 480px);
   overflow: auto;

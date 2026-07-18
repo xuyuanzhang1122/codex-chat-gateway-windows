@@ -66,16 +66,28 @@ if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
 $rootFiles = @(
     '.gitignore', 'AGENTS.md', 'README.md', 'CHANGELOG.md', 'LICENSE',
     'THIRD_PARTY_NOTICES.md', 'VERSION',
-    'config.yaml', 'run_gateway.py',
-    'check-gateway.bat', 'configure-claude-desktop.bat', 'configure-codex.bat', 'disable-autostart.bat',
-    'enable-autostart.bat', 'gateway-status.bat', 'model-config.bat',
-    'restore-official-claude-desktop.bat', 'restore-official-codex.bat', 'start-gateway.bat', 'stop-gateway.bat',
-    '检查网关.bat', '模型配置.bat', '配置Claude Desktop Code模式.bat', '配置Codex.bat',
-    '恢复Claude Desktop官方配置.bat', '恢复Codex官方配置.bat', 'desktop.bat', '桌面版.bat',
-    '启动网关.bat', '停止网关.bat', '网关状态.bat'
+    'config.yaml', 'run_gateway.py'
 )
 foreach ($name in $rootFiles) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination (Join-Path $stage $name) -Force
+}
+
+# Launchers live in bin/ for the source tree; portable package keeps them at the package root
+# with paths rewritten to sit next to scripts/ (flat layout users expect).
+$binDir = Join-Path $projectRoot 'bin'
+$excludeLaunchers = @('desktop-tauri.bat', 'install.bat')
+Get-ChildItem -LiteralPath $binDir -Filter '*.bat' -File | ForEach-Object {
+    $name = $_.Name
+    if ($excludeLaunchers -contains $name) { return }
+    if ($name -match 'Studio|Tauri|tauri|build') { return }
+    $text = [IO.File]::ReadAllText($_.FullName)
+    # bin launchers point at ..\scripts; portable stage is flat next to scripts/
+    $text = $text.Replace('%~dp0..\scripts\', '%~dp0scripts\')
+    $text = $text.Replace('%~dp0../scripts/', '%~dp0scripts/')
+    $text = $text.Replace('%~dp0..\CodexChatGateway.exe', '%~dp0CodexChatGateway.exe')
+    $text = $text.Replace('%~dp0../CodexChatGateway.exe', '%~dp0CodexChatGateway.exe')
+    $dest = Join-Path $stage $name
+    [IO.File]::WriteAllText($dest, $text)
 }
 
 $releaseScripts = @(

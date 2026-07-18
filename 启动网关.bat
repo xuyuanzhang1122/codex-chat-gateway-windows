@@ -1,4 +1,2 @@
 @echo off
-setlocal
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-background.ps1"
-if errorlevel 1 pause
+call "%~dp0bin\启动网关.bat" %*
