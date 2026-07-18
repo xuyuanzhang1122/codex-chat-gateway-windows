@@ -10,6 +10,11 @@
 </p>
 
 <p align="center">
+  <a href="README.md">English</a> ·
+  <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/actions/workflows/release.yml"><img src="https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/actions/workflows/release.yml/badge.svg" alt="build"></a>
   <a href="https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases"><img src="https://img.shields.io/github/v/release/xuyuanzhang1122/codex-chat-gateway-windows" alt="release"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20x64-0078d7" alt="platform">
