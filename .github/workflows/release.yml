@@ -1,4 +1,4 @@
-name: Build portable release
+name: Build Studio release
 
 on:
   push:
@@ -11,10 +11,147 @@ permissions:
   contents: write
 
 jobs:
-  build-windows-x64:
-    # Windows Server 2022 includes Inno Setup; the 2025 image removed it.
+  # ---------------------------------------------------------------------------
+  # Primary: Tauri Studio installer (+ optional signed updater artifacts)
+  # ---------------------------------------------------------------------------
+  studio-windows-x64:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Validate tag and VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match VERSION v$version"
+          }
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop-tauri/package-lock.json
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop-tauri/src-tauri/target
+          key: ${{ runner.os }}-cargo-studio-${{ hashFiles('desktop-tauri/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-studio-
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          $url = "https://jrsoftware.org/download.php/is.exe"
+          $installer = Join-Path $env:TEMP "innosetup-install.exe"
+          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+          Start-Process -FilePath $installer -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" -Wait
+          $iscc = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found after Inno install" }
+          Write-Host "ISCC=$iscc"
+          echo "ISCC=$iscc" >> $env:GITHUB_ENV
+
+      - name: Install WebView2 runtime (if missing)
+        shell: pwsh
+        run: |
+          # GitHub windows runners usually have WebView2; keep step for safety.
+          Write-Host "WebView2 check skipped (bundled bootstrapper in tauri.conf)"
+
+      - name: Build Studio installer
+        shell: pwsh
+        run: |
+          ./scripts/build-tauri-installer.ps1 -InnoCompiler $env:ISCC
+
+      - name: Build signed updater artifacts (optional)
+        # Requires repo secret TAURI_SIGNING_PRIVATE_KEY (minisign private key contents).
+        # Optional: TAURI_SIGNING_PRIVATE_KEY_PASSWORD if the key is encrypted.
+        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          # Studio installer uses --no-bundle; updater needs a signed NSIS zip from full tauri build.
+          ./scripts/build-updater-artifacts.ps1
+
+      - name: Upload Studio artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: codex-chat-gateway-studio-windows-x64
+          path: |
+            dist-installer/CodexChatGateway-Studio-Setup-v*.exe
+            dist-installer/CodexChatGateway-Studio-Setup-v*.exe.sha256
+            dist-installer/CodexChatGateway-Studio-Updater-*
+            dist-installer/latest.json
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (Studio)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $files = @(
+            Get-ChildItem dist-installer -File -ErrorAction SilentlyContinue |
+              Where-Object {
+                $_.Name -like 'CodexChatGateway-Studio-Setup-v*.exe' -or
+                $_.Name -like 'CodexChatGateway-Studio-Setup-v*.exe.sha256' -or
+                $_.Name -like 'CodexChatGateway-Studio-Updater-*' -or
+                $_.Name -eq 'latest.json'
+              } |
+              ForEach-Object FullName
+          )
+          if ($files.Count -eq 0) { throw "No Studio release files found under dist-installer" }
+          Write-Host "Uploading:"
+          $files | ForEach-Object { Write-Host "  $_" }
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @files --clobber
+          } else {
+            $notes = @"
+          ## Codex Chat Gateway Studio $tag
+
+          - **Studio console**: Tauri 2 + LobeHub UI
+          - Gateway on ``127.0.0.1`` only
+          - Optional auto-update via ``latest.json`` (signed)
+
+          See [README](https://github.com/xuyuanzhang1122/codex-chat-gateway-windows#readme) / [中文说明](https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/blob/main/README.zh-CN.md).
+          "@
+            gh release create $tag @files --title $tag --notes $notes
+          }
+
+  # ---------------------------------------------------------------------------
+  # Legacy: portable + old WPF installer (kept for compatibility; non-blocking)
+  # ---------------------------------------------------------------------------
+  legacy-portable-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    continue-on-error: true
 
     steps:
       - name: Check out source
@@ -26,47 +163,69 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Validate tag and version
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        run: |
-          $version = (Get-Content VERSION -Raw).Trim()
-          if ("v$version" -ne "${{ github.ref_name }}") {
-            throw "Tag ${{ github.ref_name }} does not match VERSION v$version"
-          }
-
       - name: Build and test portable package
         shell: pwsh
         run: ./scripts/build-portable.ps1
 
-      - name: Build branded EXE installer
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          $url = "https://jrsoftware.org/download.php/is.exe"
+          $installer = Join-Path $env:TEMP "innosetup-install.exe"
+          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+          Start-Process -FilePath $installer -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" -Wait
+
+      - name: Build legacy branded EXE installer
         shell: pwsh
         run: |
           $version = (Get-Content VERSION -Raw).Trim()
-          ./scripts/build-installer.ps1 -PayloadDirectory "dist/codex-chat-gateway-portable-v$version"
+          $iscc = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          ./scripts/build-installer.ps1 -PayloadDirectory "dist/codex-chat-gateway-portable-v$version" -InnoCompiler $iscc
 
-      - name: Upload workflow artifact
+      - name: Upload legacy artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: codex-chat-gateway-windows-x64
+          name: codex-chat-gateway-legacy-windows-x64
           path: |
             dist/*.7z
             dist/*.sha256
-            dist-installer/*.exe
-            dist-installer/*.sha256
-          if-no-files-found: error
+            dist-installer/CodexChatGateway-Setup-v*.exe
+            dist-installer/CodexChatGateway-Setup-v*.exe.sha256
+          if-no-files-found: warn
 
-      - name: Publish GitHub Release
+      - name: Attach legacy files to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ github.ref_name }}"
-          $files = @(Get-ChildItem dist, dist-installer -File | Where-Object { $_.Extension -in @('.7z', '.exe') -or $_.Name -like '*.sha256' } | ForEach-Object FullName)
+          $files = @(
+            Get-ChildItem dist -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Extension -in @('.7z') -or $_.Name -like '*.sha256' } |
+              ForEach-Object FullName
+          )
+          $files += @(
+            Get-ChildItem dist-installer -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -like 'CodexChatGateway-Setup-v*' } |
+              ForEach-Object FullName
+          )
+          if ($files.Count -eq 0) {
+            Write-Host "No legacy files to upload"
+            exit 0
+          }
+          # Wait briefly for Studio job to create the release if racing
+          for ($i = 0; $i -lt 30; $i++) {
+            gh release view $tag *> $null
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep -Seconds 10
+          }
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @files --clobber
           } else {
-            gh release create $tag @files --title $tag --generate-notes
+            Write-Host "Release $tag not found yet; skipping legacy upload"
           }

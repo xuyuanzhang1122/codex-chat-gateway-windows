@@ -47,30 +47,50 @@ dist-installer/CodexChatGateway-Studio-Setup-vX.Y.Z.exe.sha256
 - 托盘菜单：显示控制台 / 隐藏 / 退出控制台（网关继续）
 - 停止网关：控制台内「停止」或卸载脚本
 
-## GitHub Release 建议流程
+## GitHub Actions（推荐）
 
-1. 更新 `VERSION`（与 `desktop-tauri/src-tauri/tauri.conf.json` / `package.json` 一致）
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`
-3. 本机构建：
+流水线：`.github/workflows/release.yml`
+
+| 触发 | 结果 |
+|------|------|
+| `push` / `PR` → `main` | 构建 **Studio 安装包**，上传 Actions Artifact；遗留便携包 job 失败不阻断 |
+| 推送标签 `vX.Y.Z`（须与 `VERSION` 一致） | 创建/更新 GitHub Release 并上传 Studio 产物 |
+| 仓库 Secret `TAURI_SIGNING_PRIVATE_KEY` 已配置 | 额外构建签名更新包 + `latest.json` 并挂到 Release |
+
+发布者只需：
 
 ```powershell
-# 完整 Studio 安装包（首次安装 / 含 runtime）
-.\scripts\build-tauri-installer.ps1
+# 1) VERSION / tauri.conf.json / package.json 已对齐
+git push origin main
+git tag v1.3.0
+git push origin v1.3.0
+# 2) 在 Actions 页查看 "Build Studio release"
+```
 
-# 应用内自动更新包（需签名私钥）
+可选 Secret（Settings → Secrets and variables → Actions）：
+
+| Secret | 说明 |
+|--------|------|
+| `TAURI_SIGNING_PRIVATE_KEY` | minisign 私钥全文（与 `tauri.conf.json` 公钥配对） |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 私钥密码（若有） |
+
+## 本机构建（可选，非必须）
+
+```powershell
+.\scripts\build-tauri-installer.ps1
 $env:TAURI_SIGNING_PRIVATE_KEY_PATH = "$env:USERPROFILE\.codex-chat-gateway\tauri-updater.key"
 .\scripts\build-updater-artifacts.ps1
 ```
 
-4. 在 [Releases](https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases) 上传：
+Release 附件：
 
 | 文件 | 用途 |
 |---|---|
 | `CodexChatGateway-Studio-Setup-vX.Y.Z.exe` | 完整安装 |
 | 同名 `.sha256` | 校验 |
 | `CodexChatGateway-Studio-Updater-vX.Y.Z-windows-x86_64.nsis.zip` | 应用内更新载荷 |
-| 同名 `.sig` | 签名旁路（可选单独上传） |
-| **`latest.json`** | 更新清单（必须，文件名固定） |
+| 同名 `.sig` / `.sha256` | 签名与校验 |
+| **`latest.json`** | 更新清单（文件名固定，挂在 latest Release） |
 
 `latest.json` 由构建脚本生成，示意：
 
