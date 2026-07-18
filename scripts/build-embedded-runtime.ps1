@@ -14,7 +14,7 @@ $buildCache = Join-Path $projectRoot '.portable-build'
 $pythonArchive = Join-Path $buildCache 'python-3.11.9-embed-amd64.zip'
 New-Item -ItemType Directory -Path $buildCache -Force | Out-Null
 if (-not (Test-Path -LiteralPath $pythonArchive)) {
-    Write-Host 'Downloading official CPython 3.11.9 embeddable x64…'
+    Write-Host 'Downloading official CPython 3.11.9 embeddable x64...'
     Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' -OutFile $pythonArchive -UseBasicParsing
 }
 $pythonHash = (Get-FileHash -LiteralPath $pythonArchive -Algorithm SHA256).Hash
@@ -28,21 +28,33 @@ if (Test-Path -LiteralPath $dest) {
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 Expand-Archive -LiteralPath $pythonArchive -DestinationPath $dest -Force
 $pth = Join-Path $dest 'python311._pth'
-[IO.File]::WriteAllLines($pth, @('python311.zip', '.', 'Lib\site-packages', '', 'import site'), [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllLines(
+    $pth,
+    @('python311.zip', '.', 'Lib\site-packages', '', 'import site'),
+    [Text.UTF8Encoding]::new($false)
+)
 $sitePackages = Join-Path $dest 'Lib\site-packages'
 New-Item -ItemType Directory -Path $sitePackages -Force | Out-Null
 
 if (-not $BuildPython) {
     $projectPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
-    if (Test-Path -LiteralPath $projectPython) { $BuildPython = $projectPython }
-    else { $BuildPython = (Get-Command python -ErrorAction Stop).Source }
+    if (Test-Path -LiteralPath $projectPython) {
+        $BuildPython = $projectPython
+    }
+    else {
+        $BuildPython = (Get-Command python -ErrorAction Stop).Source
+    }
 }
 & $BuildPython -m pip --version *> $null
-if ($LASTEXITCODE -ne 0) { throw "Build Python does not provide pip: $BuildPython" }
+if ($LASTEXITCODE -ne 0) {
+    throw "Build Python does not provide pip: $BuildPython"
+}
 
-Write-Host "Installing LiteLLM into embedded runtime via $BuildPython …"
+Write-Host "Installing LiteLLM into embedded runtime via $BuildPython ..."
 & $BuildPython -m pip install --disable-pip-version-check --quiet --target $sitePackages -r (Join-Path $projectRoot 'requirements.txt')
-if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
+if ($LASTEXITCODE -ne 0) {
+    throw 'Dependency installation failed.'
+}
 
 if (-not (Test-Path -LiteralPath (Join-Path $dest 'python.exe'))) {
     throw "Embedded runtime incomplete: $dest"
