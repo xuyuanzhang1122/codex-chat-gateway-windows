@@ -14,3 +14,5 @@
 - 升级 LiteLLM 前核对 `/responses`、流式输出及工具调用兼容性并完成冒烟测试。
 - 新桌面控制台优先维护 `desktop-tauri/`（Tauri 2 + React）；网关仍只监听 `127.0.0.1`，密钥不得写入前端静态资源或客户端配置。
 - 旧版 WPF（`desktop/GatewayDesktop.cs` / `CodexChatGateway.exe`）在 Tauri 版稳定前可并存，勿在未确认分发策略前删除。
+- Studio 安装包由 `scripts/build-tauri-installer.ps1` 构建；关闭控制台不得默认杀掉网关进程。
+- 自动更新仅允许 HTTPS Release 通道，签名密钥不得提交进仓库。
