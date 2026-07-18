@@ -55,20 +55,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-studio-
 
-      - name: Install Inno Setup 6
+      - name: Install Inno Setup
         shell: pwsh
         run: |
-          $installer = Join-Path $env:TEMP "innosetup-install.exe"
-          Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile $installer -UseBasicParsing
-          Start-Process -FilePath $installer -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" -Wait
+          choco install innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed: $LASTEXITCODE" }
           $pf86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
           $candidates = @(
             (Join-Path $pf86 "Inno Setup 6\ISCC.exe"),
             (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe"),
-            (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
+            (Join-Path $pf86 "Inno Setup 5\ISCC.exe")
           )
-          $iscc = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-          if (-not $iscc) { throw "ISCC.exe not found after Inno install" }
+          $iscc = $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+          if (-not $iscc) {
+            $iscc = Get-ChildItem -Path $pf86,$env:ProgramFiles -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $iscc) { throw "ISCC.exe not found after choco install innosetup" }
           Write-Host "ISCC=$iscc"
           "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
@@ -148,12 +151,11 @@ jobs:
         shell: pwsh
         run: ./scripts/build-portable.ps1
 
-      - name: Install Inno Setup 6
+      - name: Install Inno Setup
         shell: pwsh
         run: |
-          $installer = Join-Path $env:TEMP "innosetup-install.exe"
-          Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile $installer -UseBasicParsing
-          Start-Process -FilePath $installer -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" -Wait
+          choco install innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed: $LASTEXITCODE" }
 
       - name: Build legacy branded EXE installer
         shell: pwsh
@@ -163,7 +165,8 @@ jobs:
           $iscc = @(
             (Join-Path $pf86 "Inno Setup 6\ISCC.exe"),
             (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
-          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found" }
           ./scripts/build-installer.ps1 -PayloadDirectory "dist/codex-chat-gateway-portable-v$version" -InnoCompiler $iscc
 
       - name: Upload legacy artifacts
