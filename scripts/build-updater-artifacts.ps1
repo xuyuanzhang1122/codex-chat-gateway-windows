@@ -103,58 +103,76 @@ if (-not (Test-Path -LiteralPath $bundleRoot)) {
     throw "Bundle directory not found: $bundleRoot"
 }
 
-# Prefer NSIS updater zip produced by createUpdaterArtifacts.
-$zipCandidates = @(
-    Get-ChildItem -LiteralPath $bundleRoot -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object {
+# Tauri 2 on Windows may emit either:
+#   - *.nsis.zip + .sig  (zipped updater package)
+#   - *-setup.exe + .sig (NSIS installer used as updater payload)
+$allFiles = @(
+    Get-ChildItem -LiteralPath $bundleRoot -Recurse -File -ErrorAction SilentlyContinue
+)
+$sigCandidates = @($allFiles | Where-Object { $_.Extension -eq '.sig' })
+
+$payload = $null
+# 1) Prefer signed NSIS setup.exe (common Tauri 2 output)
+$setupExes = @(
+    $allFiles | Where-Object {
+        $_.Extension -eq '.exe' -and
+        ($_.Name -match 'setup' -or $_.DirectoryName -match 'nsis') -and
+        ($_.Name -notmatch 'uninstall')
+    }
+)
+foreach ($exe in ($setupExes | Sort-Object Length -Descending)) {
+    $sibling = $exe.FullName + '.sig'
+    if (Test-Path -LiteralPath $sibling) {
+        $payload = $exe
+        break
+    }
+}
+
+# 2) Fallback: nsis.zip
+if (-not $payload) {
+    $zips = @(
+        $allFiles | Where-Object {
             $_.Name -match '\.nsis\.zip$' -or
             ($_.Extension -eq '.zip' -and $_.Name -match 'nsis|setup|x64')
         }
-)
-$sigCandidates = @(
-    Get-ChildItem -LiteralPath $bundleRoot -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '\.sig$' }
-)
-
-$zip = $zipCandidates | Sort-Object Length -Descending | Select-Object -First 1
-if (-not $zip) {
-    # Fallback: any updater-related archive under nsis/
-    $zip = Get-ChildItem -LiteralPath $bundleRoot -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -eq '.zip' } |
-        Sort-Object Length -Descending |
-        Select-Object -First 1
+    )
+    foreach ($z in ($zips | Sort-Object Length -Descending)) {
+        $sibling = $z.FullName + '.sig'
+        if (Test-Path -LiteralPath $sibling) {
+            $payload = $z
+            break
+        }
+    }
 }
-if (-not $zip) {
+
+if (-not $payload) {
     throw @"
-No updater zip found under $bundleRoot
-Ensure tauri.conf.json has bundle.createUpdaterArtifacts=true and targets include nsis,
-and TAURI_SIGNING_PRIVATE_KEY(_PATH) is set so signing succeeds.
+No signed updater payload found under $bundleRoot
+Looked for *-setup.exe.sig and *.nsis.zip.sig.
+Ensure createUpdaterArtifacts=true, targets include nsis, and TAURI_SIGNING_PRIVATE_KEY is set.
 "@
 }
 
-$sig = $sigCandidates |
-    Where-Object { $_.FullName -eq ($zip.FullName + '.sig') -or $_.Name -eq ($zip.Name + '.sig') } |
-    Select-Object -First 1
-if (-not $sig) {
-    $sig = $sigCandidates | Where-Object { $_.BaseName -eq $zip.Name -or $_.Name -like "*$($zip.BaseName)*" } | Select-Object -First 1
+$sigPath = $payload.FullName + '.sig'
+if (-not (Test-Path -LiteralPath $sigPath)) {
+    $sig = $sigCandidates | Where-Object { $_.Name -eq ($payload.Name + '.sig') } | Select-Object -First 1
+    if ($sig) { $sigPath = $sig.FullName }
 }
-if (-not $sig) {
-    # Tauri often writes sibling .sig next to the zip
-    $sibling = $zip.FullName + '.sig'
-    if (Test-Path -LiteralPath $sibling) {
-        $sig = Get-Item -LiteralPath $sibling
-    }
-}
-if (-not $sig) {
-    throw "Signature file (.sig) not found for $($zip.FullName). Signing may have failed."
+if (-not (Test-Path -LiteralPath $sigPath)) {
+    throw "Signature file (.sig) not found for $($payload.FullName)."
 }
 
-$outZipName = "CodexChatGateway-Studio-Updater-v$version-windows-x86_64.nsis.zip"
+$ext = $payload.Extension.ToLowerInvariant()
+if ($ext -eq '.exe') {
+    $outZipName = "CodexChatGateway-Studio-Updater-v$version-windows-x86_64-setup.exe"
+} else {
+    $outZipName = "CodexChatGateway-Studio-Updater-v$version-windows-x86_64.nsis.zip"
+}
 $outSigName = "$outZipName.sig"
 $outZip = Join-Path $outputRoot $outZipName
 $outSig = Join-Path $outputRoot $outSigName
-Copy-Item -LiteralPath $zip.FullName -Destination $outZip -Force
-Copy-Item -LiteralPath $sig.FullName -Destination $outSig -Force
+Copy-Item -LiteralPath $payload.FullName -Destination $outZip -Force
+Copy-Item -LiteralPath $sigPath -Destination $outSig -Force
 
 $signature = (Get-Content -LiteralPath $outSig -Raw).Trim()
 if ([string]::IsNullOrWhiteSpace($signature)) {

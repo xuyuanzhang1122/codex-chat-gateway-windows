@@ -82,6 +82,8 @@ jobs:
           ./scripts/build-tauri-installer.ps1 -InnoCompiler $env:ISCC
 
       - name: Build signed updater artifacts
+        # Non-blocking: Studio Setup must still ship if signing/NSIS updater fails.
+        continue-on-error: true
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -182,6 +184,7 @@ jobs:
 
       - name: Attach legacy files to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
+        continue-on-error: true
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
