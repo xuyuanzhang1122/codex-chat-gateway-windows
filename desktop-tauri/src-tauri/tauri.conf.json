@@ -12,16 +12,19 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Codex Chat Gateway",
-        "width": 1180,
-        "height": 780,
-        "minWidth": 980,
-        "minHeight": 680,
+        "width": 1240,
+        "height": 820,
+        "minWidth": 1020,
+        "minHeight": 700,
         "resizable": true,
         "fullscreen": false,
-        "decorations": true,
+        "decorations": false,
         "transparent": false,
-        "center": true
+        "center": true,
+        "shadow": true,
+        "visible": true
       }
     ],
     "security": {

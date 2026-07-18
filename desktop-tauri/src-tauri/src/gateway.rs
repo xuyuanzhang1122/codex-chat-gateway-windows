@@ -57,7 +57,17 @@ pub struct ActionResult {
     pub status: GatewayStatus,
 }
 
+/// Lightweight status for UI polling — no full process table scan, no /models fan-out.
 pub fn status() -> GatewayStatus {
+    status_inner(false)
+}
+
+/// Full status after start/stop/check — may scan processes and list model routes.
+pub fn status_full() -> GatewayStatus {
+    status_inner(true)
+}
+
+fn status_inner(detailed: bool) -> GatewayStatus {
     let root = project_root();
     let store = read_store().ok();
     let default_name = store
@@ -65,45 +75,58 @@ pub fn status() -> GatewayStatus {
         .and_then(|s| default_profile(s))
         .map(|p| p.name.clone());
 
-    let healthy = health_alive();
-    let routes = if healthy {
+    let healthy = health_alive_ms(if detailed { 1200 } else { 500 });
+    let routes = if detailed && healthy {
         list_routes().unwrap_or_default()
     } else {
         Vec::new()
     };
-    let is_our = healthy && is_our_gateway(&routes);
-    let file = read_state_file(&root);
-    let live_pid = find_gateway_pid(&root);
 
+    let file = read_state_file(&root);
     let (pid, model, started_at, uptime) = if let Some(ref st) = file {
-        let pid_alive = process_matches(&root, st.pid, &st.executable, &st.runner);
-        if pid_alive {
+        if pid_alive(st.pid) {
             (
                 Some(st.pid),
                 Some(st.model.clone()),
                 Some(st.started_at.clone()),
                 format_uptime(&st.started_at),
             )
-        } else if let Some(pid) = live_pid {
-            (Some(pid), Some(st.model.clone()), None, None)
         } else if healthy {
-            (None, None, None, None)
+            // Process gone from state but port still answers
+            (None, Some(st.model.clone()), None, None)
         } else {
-            // stale state
-            let _ = fs::remove_file(state_path(&root));
+            // stale state — only remove on detailed path to avoid disk churn while polling
+            if detailed {
+                let _ = fs::remove_file(state_path(&root));
+            }
             (None, None, None, None)
         }
-    } else if let Some(pid) = live_pid {
-        (Some(pid), None, None, None)
+    } else if detailed {
+        if let Some(pid) = find_gateway_pid(&root) {
+            (Some(pid), None, None, None)
+        } else {
+            (None, None, None, None)
+        }
     } else {
         (None, None, None, None)
+    };
+
+    // Polling path: liveliness only. Start/check path: verify codex-chat route.
+    let is_our = if detailed {
+        healthy && is_our_gateway(&routes)
+    } else {
+        healthy
     };
 
     let running = healthy || pid.is_some();
     let message = if !running {
         "网关未在运行".into()
     } else if healthy && is_our {
-        "运行中 · 本机网关身份校验通过".into()
+        if detailed && !routes.is_empty() {
+            "运行中 · 本机网关身份校验通过".into()
+        } else {
+            "运行中".into()
+        }
     } else if healthy && !is_our {
         "端口 4000 有服务响应，但缺少 codex-chat 路由（可能不是本网关）".into()
     } else {
@@ -131,7 +154,7 @@ pub fn start_gateway() -> ActionResult {
     logs.push(format!("项目目录: {}", root.display()));
 
     // Already healthy & ours → ensure state and return ok
-    let current = status();
+    let current = status_full();
     if current.healthy && current.is_our_gateway {
         if let Err(e) = ensure_state_for_running(&root, &mut logs) {
             logs.push(format!("补写状态失败: {e}"));
@@ -142,7 +165,7 @@ pub fn start_gateway() -> ActionResult {
             ok: true,
             message: "Gateway is already running".into(),
             logs,
-            status: status(),
+            status: status_full(),
         };
     }
     if current.healthy && !current.is_our_gateway {
@@ -163,7 +186,7 @@ pub fn start_gateway() -> ActionResult {
                 ok: false,
                 message: e,
                 logs,
-                status: status(),
+                status: status_full(),
             };
         }
     };
@@ -174,7 +197,7 @@ pub fn start_gateway() -> ActionResult {
             ok: false,
             message: msg,
             logs,
-            status: status(),
+            status: status_full(),
         };
     };
 
@@ -187,7 +210,7 @@ pub fn start_gateway() -> ActionResult {
                 ok: false,
                 message: msg,
                 logs,
-                status: status(),
+                status: status_full(),
             };
         }
     };
@@ -200,7 +223,7 @@ pub fn start_gateway() -> ActionResult {
             ok: false,
             message: msg,
             logs,
-            status: status(),
+            status: status_full(),
         };
     }
 
@@ -219,7 +242,7 @@ pub fn start_gateway() -> ActionResult {
                 ok: false,
                 message: msg,
                 logs,
-                status: status(),
+                status: status_full(),
             };
         }
     };
@@ -232,7 +255,7 @@ pub fn start_gateway() -> ActionResult {
                 ok: false,
                 message: msg,
                 logs,
-                status: status(),
+                status: status_full(),
             };
         }
     };
@@ -274,7 +297,7 @@ pub fn start_gateway() -> ActionResult {
                 ok: false,
                 message: msg,
                 logs,
-                status: status(),
+                status: status_full(),
             };
         }
     };
@@ -303,7 +326,7 @@ pub fn start_gateway() -> ActionResult {
             logs.push(format!("进程在就绪前退出（尝试 {attempt}）"));
             break;
         }
-        if health_alive() {
+        if health_alive_ms(800) {
             let routes = list_routes().unwrap_or_default();
             if is_our_gateway(&routes) {
                 ready = true;
@@ -320,7 +343,7 @@ pub fn start_gateway() -> ActionResult {
             ok: false,
             message: "Gateway failed to become ready".into(),
             logs,
-            status: status(),
+            status: status_full(),
         };
     }
 
@@ -332,7 +355,7 @@ pub fn start_gateway() -> ActionResult {
         ok: true,
         message: "Gateway started".into(),
         logs,
-        status: status(),
+        status: status_full(),
     }
 }
 
@@ -372,7 +395,7 @@ pub fn stop_gateway() -> ActionResult {
 
     // 3) If something still healthy on port and ours, report failure
     thread::sleep(Duration::from_millis(300));
-    let st = status();
+    let st = status_full();
     if st.healthy && st.is_our_gateway {
         logs.push("停止后健康检查仍通过，可能有未识别的残留进程".into());
         return ActionResult {
@@ -391,7 +414,7 @@ pub fn stop_gateway() -> ActionResult {
         ok: true,
         message: "Gateway stopped".into(),
         logs,
-        status: status(),
+        status: status_full(),
     }
 }
 
@@ -417,7 +440,7 @@ pub fn restart_gateway() -> ActionResult {
 
 pub fn check_gateway() -> ActionResult {
     let mut logs = Vec::new();
-    let st = status();
+    let st = status_full();
     if !st.healthy {
         logs.push("健康检查失败：本地网关不可达".into());
         return ActionResult {
@@ -460,9 +483,9 @@ pub fn check_gateway() -> ActionResult {
     }
 }
 
-fn health_alive() -> bool {
+fn health_alive_ms(timeout_ms: u64) -> bool {
     let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_millis(1200))
+        .timeout(Duration::from_millis(timeout_ms))
         .build();
     agent
         .get(&format!("{ENDPOINT}/health/liveliness"))
@@ -544,8 +567,9 @@ fn ensure_state_for_running(root: &Path, logs: &mut Vec<String>) -> Result<(), S
 
 fn process_matches(root: &Path, pid: u32, expected_exe: &str, expected_runner: &str) -> bool {
     let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
-    let Some(proc) = sys.process(sysinfo::Pid::from_u32(pid)) else {
+    let handle = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes(ProcessesToUpdate::Some(&[handle]), true);
+    let Some(proc) = sys.process(handle) else {
         return false;
     };
     let exe = proc
@@ -592,14 +616,16 @@ fn process_matches(root: &Path, pid: u32, expected_exe: &str, expected_runner: &
 
 fn pid_alive(pid: u32) -> bool {
     let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
-    sys.process(sysinfo::Pid::from_u32(pid)).is_some()
+    let handle = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes(ProcessesToUpdate::Some(&[handle]), true);
+    sys.process(handle).is_some()
 }
 
 fn kill_pid(pid: u32) -> bool {
     let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
-    if let Some(proc) = sys.process(sysinfo::Pid::from_u32(pid)) {
+    let handle = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes(ProcessesToUpdate::Some(&[handle]), true);
+    if let Some(proc) = sys.process(handle) {
         return proc.kill();
     }
     false
@@ -729,7 +755,7 @@ pub fn run_project_script(name: &str) -> Result<ActionResult, String> {
             format!("{name} 失败（退出码 {code}）")
         },
         logs,
-        status: status(),
+        status: status_full(),
     })
 }
 
