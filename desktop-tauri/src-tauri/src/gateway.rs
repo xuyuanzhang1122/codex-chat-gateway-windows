@@ -6,7 +6,8 @@
 
 use crate::models::{claude_litellm_model, default_profile, read_store, ModelStore};
 use crate::paths::{
-    config_yaml, logs_dir, project_root, python_runtime, run_gateway_py, state_path,
+    config_yaml, logs_dir, normalize_path_text, normalize_text, project_root,
+    project_root_display, python_runtime, run_gateway_py, state_path, strip_extended_prefix,
 };
 use chrono::{DateTime, Local, Utc};
 use parking_lot::RwLock;
@@ -396,7 +397,7 @@ impl GatewayManager {
         emit_log(app, "INFO", "▶ 启动网关");
 
         let root = project_root();
-        emit_log(app, "DIM", &format!("项目目录: {}", root.display()));
+        emit_log(app, "DIM", &format!("项目目录: {}", project_root_display()));
 
         // Already healthy?
         if health_probe(400) {
@@ -522,8 +523,12 @@ impl GatewayManager {
 
         let state = GatewayStateFile {
             pid,
-            executable: python.to_string_lossy().to_string(),
-            runner: runner.to_string_lossy().to_string(),
+            executable: strip_extended_prefix(python.clone())
+                .to_string_lossy()
+                .into_owned(),
+            runner: strip_extended_prefix(runner.clone())
+                .to_string_lossy()
+                .into_owned(),
             endpoint: ENDPOINT.into(),
             model: profile.litellm_model.clone(),
             started_at: started_at.clone(),
@@ -563,7 +568,13 @@ impl GatewayManager {
         }
 
         if !ready {
-            let _ = kill_pid(pid);
+            // Only kill the process we just spawned (session child / known pid+runner).
+            let _ = kill_verified(
+                &root,
+                pid,
+                Some(python.to_string_lossy().as_ref()),
+                Some(runner.to_string_lossy().as_ref()),
+            );
             let _ = fs::remove_file(state_path(&root));
             {
                 let mut g = self.inner.write();
@@ -630,23 +641,42 @@ impl GatewayManager {
         let root = project_root();
         let mut killed = Vec::new();
 
-        // Drop owned child first
+        // Drop owned child first (we spawned it this session).
         {
             let mut g = self.inner.write();
             if let Some(mut child) = g.child.take() {
                 let pid = child.id();
-                let _ = child.kill();
-                let _ = child.wait();
-                killed.push(pid);
-                emit_log(app, "DIM", &format!("已停止会话子进程 PID {pid}"));
+                // Still verify identity before kill — PID reuse is rare mid-session but cheap to check.
+                if process_is_our_gateway(&root, pid) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    killed.push(pid);
+                    emit_log(app, "DIM", &format!("已停止会话子进程 PID {pid}"));
+                } else {
+                    emit_log(
+                        app,
+                        "DIM",
+                        &format!("会话 PID {pid} 已不是本网关进程，跳过 kill"),
+                    );
+                    let _ = child.wait();
+                }
             }
         }
 
         if let Some(st) = read_state_file(&root) {
-            if pid_alive(st.pid) && !killed.contains(&st.pid) {
-                if kill_pid(st.pid) {
+            if !killed.contains(&st.pid) {
+                if kill_verified(&root, st.pid, Some(&st.executable), Some(&st.runner)) {
                     emit_log(app, "DIM", &format!("已停止 state PID {}", st.pid));
                     killed.push(st.pid);
+                } else if pid_alive(st.pid) {
+                    emit_log(
+                        app,
+                        "DIM",
+                        &format!(
+                            "拒绝停止 PID {}：与 state 中的 exe/runner 身份不匹配（可能已复用）",
+                            st.pid
+                        ),
+                    );
                 }
             }
         }
@@ -655,7 +685,8 @@ impl GatewayManager {
             if killed.contains(&pid) {
                 continue;
             }
-            if kill_pid(pid) {
+            // Discovery path: only kill when cmdline proves it is our project gateway.
+            if kill_verified(&root, pid, None, None) {
                 emit_log(app, "DIM", &format!("已停止发现的网关进程 PID {pid}"));
                 killed.push(pid);
             }
@@ -804,11 +835,15 @@ fn write_state_file(root: &Path, state: &GatewayStateFile) -> Result<(), String>
 
 fn ensure_state_for_running(root: &Path) -> Result<(), String> {
     if let Some(st) = read_state_file(root) {
-        if pid_alive(st.pid) {
+        // Trust state only when pid still matches recorded identity.
+        if process_matches(root, st.pid, &st.executable, &st.runner) {
             return Ok(());
         }
     }
     let pid = find_gateway_pid(root).ok_or_else(|| "无法定位网关 PID".to_string())?;
+    if !process_is_our_gateway(root, pid) {
+        return Err("发现的进程未能通过网关身份校验".into());
+    }
     let python = python_runtime(root)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
@@ -837,7 +872,25 @@ fn pid_alive(pid: u32) -> bool {
     sys.process(handle).is_some()
 }
 
-fn kill_pid(pid: u32) -> bool {
+/// Kill only after identity checks. When exe/runner are provided, both path and cmdline must match.
+/// When omitted (discovery), cmdline must prove this project's `run_gateway.py`.
+fn kill_verified(
+    root: &Path,
+    pid: u32,
+    expected_exe: Option<&str>,
+    expected_runner: Option<&str>,
+) -> bool {
+    let ok = match (expected_exe, expected_runner) {
+        (Some(exe), Some(runner)) => process_matches(root, pid, exe, runner),
+        _ => process_is_our_gateway(root, pid),
+    };
+    if !ok {
+        return false;
+    }
+    kill_pid_raw(pid)
+}
+
+fn kill_pid_raw(pid: u32) -> bool {
     let mut sys = System::new();
     let handle = sysinfo::Pid::from_u32(pid);
     sys.refresh_processes(ProcessesToUpdate::Some(&[handle]), true);
@@ -847,6 +900,90 @@ fn kill_pid(pid: u32) -> bool {
     false
 }
 
+/// Dual check: executable path (python/pythonw tolerant) + cmdline contains our runner under root.
+fn process_matches(root: &Path, pid: u32, expected_exe: &str, expected_runner: &str) -> bool {
+    let mut sys = System::new();
+    let handle = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes(ProcessesToUpdate::Some(&[handle]), true);
+    let Some(proc) = sys.process(handle) else {
+        return false;
+    };
+
+    let actual_exe = proc
+        .exe()
+        .map(|p| normalize_path_text(p))
+        .unwrap_or_default();
+    let expected = normalize_text(expected_exe);
+    if !actual_exe.is_empty() && !expected.is_empty() {
+        let actual_stem = Path::new(&actual_exe)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let expected_stem = Path::new(&expected)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let both_python = actual_stem.starts_with("python") && expected_stem.starts_with("python");
+        if !both_python && actual_exe != expected {
+            return false;
+        }
+        if both_python {
+            let a_dir = Path::new(&actual_exe)
+                .parent()
+                .map(normalize_path_text)
+                .unwrap_or_default();
+            let e_dir = Path::new(&expected)
+                .parent()
+                .map(|p| normalize_text(&p.to_string_lossy()))
+                .unwrap_or_default();
+            // Prefer same runtime directory; if dirs differ still require cmdline ownership.
+            if !a_dir.is_empty() && !e_dir.is_empty() && a_dir != e_dir {
+                // fall through to cmdline check only
+            } else if actual_exe != expected && !both_python {
+                return false;
+            }
+        }
+    }
+
+    let runner_name = Path::new(expected_runner)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("run_gateway.py");
+    let cmd = process_cmdline(proc);
+    let cmd_n = normalize_text(&cmd);
+    let root_n = normalize_path_text(root);
+    let runner_n = normalize_text(expected_runner);
+
+    cmd_n.contains(&runner_name.to_ascii_lowercase())
+        && (cmd_n.contains(&root_n) || cmd_n.contains(&runner_n))
+}
+
+fn process_is_our_gateway(root: &Path, pid: u32) -> bool {
+    let mut sys = System::new();
+    let handle = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes(ProcessesToUpdate::Some(&[handle]), true);
+    let Some(proc) = sys.process(handle) else {
+        return false;
+    };
+    let cmd_n = normalize_text(&process_cmdline(proc));
+    if !cmd_n.contains("run_gateway.py") {
+        return false;
+    }
+    let root_n = normalize_path_text(root);
+    let runner_n = normalize_path_text(&run_gateway_py(root));
+    cmd_n.contains(&root_n) || cmd_n.contains(&runner_n)
+}
+
+fn process_cmdline(proc: &sysinfo::Process) -> String {
+    proc.cmd()
+        .iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn find_gateway_pid(root: &Path) -> Option<u32> {
     find_all_gateway_pids(root).into_iter().next()
 }
@@ -854,34 +991,20 @@ fn find_gateway_pid(root: &Path) -> Option<u32> {
 fn find_all_gateway_pids(root: &Path) -> Vec<u32> {
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::All, true);
-    let runner = run_gateway_py(root);
-    let runner_s = normalize_path(&runner);
-    let root_s = normalize_path(root);
+    let runner_n = normalize_path_text(&run_gateway_py(root));
+    let root_n = normalize_path_text(root);
     let mut pids = Vec::new();
     for (pid, proc) in sys.processes() {
-        let cmd = proc
-            .cmd()
-            .iter()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
-        if !cmd.contains("run_gateway.py") {
+        let cmd_n = normalize_text(&process_cmdline(proc));
+        if !cmd_n.contains("run_gateway.py") {
             continue;
         }
-        if cmd.contains(&root_s) || cmd.contains(&runner_s) {
+        // Both sides normalized: no `\\?\`, lowercase, backslashes — so match works.
+        if cmd_n.contains(&root_n) || cmd_n.contains(&runner_n) {
             pids.push(pid.as_u32());
         }
     }
     pids
-}
-
-fn normalize_path(path: &Path) -> String {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .trim_start_matches(r"\\?\")
-        .replace('/', "\\")
-        .to_ascii_lowercase()
 }
 
 fn format_uptime(started_at: &str) -> Option<String> {
@@ -913,11 +1036,11 @@ pub fn open_logs_folder() -> Result<String, String> {
     let root = project_root();
     let dir = logs_dir(&root);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.to_string_lossy().to_string())
+    Ok(strip_extended_prefix(dir).to_string_lossy().to_string())
 }
 
 pub fn project_root_string() -> String {
-    project_root().to_string_lossy().to_string()
+    project_root_display()
 }
 
 pub fn read_version() -> String {
@@ -988,7 +1111,15 @@ fn run_ps_script(script: &Path) -> Result<String, String> {
 }
 
 fn run_ps_script_raw(script: &Path) -> Result<(i32, String, String), String> {
-    let root = project_root();
+    use std::io::Read;
+    use std::sync::mpsc;
+
+    // Strip `\\?\` — PowerShell -File with extended paths leaves $PSScriptRoot empty.
+    let root = strip_extended_prefix(project_root());
+    let script = strip_extended_prefix(script.to_path_buf());
+    let script_s = script.to_string_lossy().into_owned();
+    let root_s = root.to_string_lossy().into_owned();
+
     let mut cmd = Command::new("powershell.exe");
     cmd.args([
         "-NoLogo",
@@ -996,9 +1127,10 @@ fn run_ps_script_raw(script: &Path) -> Result<(i32, String, String), String> {
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        &script.to_string_lossy(),
+        &script_s,
     ])
     .current_dir(&root)
+    .env("CODEX_CHAT_GATEWAY_ROOT", &root_s)
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
 
@@ -1009,13 +1141,60 @@ fn run_ps_script_raw(script: &Path) -> Result<(i32, String, String), String> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let output = cmd
-        .output()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("无法启动 PowerShell: {e}"))?;
-    let code = output.status.code().unwrap_or(-1);
-    let out = String::from_utf8_lossy(&output.stdout).to_string();
-    let err = String::from_utf8_lossy(&output.stderr).to_string();
-    Ok((code, out, err))
+
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+
+    let (tx_out, rx_out) = mpsc::channel::<Vec<u8>>();
+    let (tx_err, rx_err) = mpsc::channel::<Vec<u8>>();
+
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = stdout_pipe.take() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        let _ = tx_out.send(buf);
+    });
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = stderr_pipe.take() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        let _ = tx_err.send(buf);
+    });
+
+    let timeout = Duration::from_secs(90);
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if started.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("PowerShell 脚本超时（90s），已终止".into());
+                }
+                thread::sleep(Duration::from_millis(40));
+            }
+            Err(e) => return Err(format!("等待 PowerShell 失败: {e}")),
+        }
+    };
+
+    let stdout = rx_out
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_default();
+    let stderr = rx_err
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_default();
+
+    Ok((
+        status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    ))
 }
 
 fn dirs_startup() -> Option<PathBuf> {

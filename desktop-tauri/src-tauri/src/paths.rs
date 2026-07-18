@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 /// Resolve once and cache the gateway project root (config.yaml + scripts/).
+/// Always returns a path **without** the Windows `\\?\` extended prefix so
+/// PowerShell `$PSScriptRoot` and process cmdline matching stay consistent.
 pub fn project_root() -> PathBuf {
     ROOT.get_or_init(discover_root).clone()
 }
@@ -12,7 +14,7 @@ fn discover_root() -> PathBuf {
     if let Ok(explicit) = std::env::var("CODEX_CHAT_GATEWAY_ROOT") {
         let p = PathBuf::from(explicit);
         if is_project_root(&p) {
-            return canonicalize(&p);
+            return canonicalize_clean(&p);
         }
     }
 
@@ -41,11 +43,12 @@ fn discover_root() -> PathBuf {
 
     for c in candidates {
         if is_project_root(&c) {
-            return canonicalize(&c);
+            return canonicalize_clean(&c);
         }
         if let Ok(resolved) = c.canonicalize() {
-            if is_project_root(&resolved) {
-                return resolved;
+            let cleaned = strip_extended_prefix(resolved);
+            if is_project_root(&cleaned) {
+                return cleaned;
             }
         }
     }
@@ -53,8 +56,36 @@ fn discover_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-fn canonicalize(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+fn canonicalize_clean(path: &Path) -> PathBuf {
+    strip_extended_prefix(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Remove Windows extended-length prefix `\\?\` / `//?/` so paths interop with
+/// PowerShell, CreateProcess consumers, and sysinfo command lines.
+pub fn strip_extended_prefix(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy();
+    let trimmed = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix("//?/"))
+        .unwrap_or(raw.as_ref());
+    PathBuf::from(trimmed)
+}
+
+/// Normalize path text for comparison (no extended prefix, backslashes, lowercase ASCII).
+pub fn normalize_path_text(path: &Path) -> String {
+    let cleaned = strip_extended_prefix(path.to_path_buf());
+    cleaned
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase()
+}
+
+/// Normalize free-form cmdline / path strings the same way as [`normalize_path_text`].
+pub fn normalize_text(s: &str) -> String {
+    s.trim_start_matches(r"\\?\")
+        .trim_start_matches("//?/")
+        .replace('/', "\\")
+        .to_ascii_lowercase()
 }
 
 fn is_project_root(path: &Path) -> bool {
@@ -90,8 +121,13 @@ pub fn python_runtime(root: &Path) -> Option<PathBuf> {
     ] {
         let p = root.join(rel);
         if p.is_file() {
-            return Some(p);
+            return Some(strip_extended_prefix(p));
         }
     }
     None
+}
+
+/// Human-readable root without `\\?\` (for logs / UI).
+pub fn project_root_display() -> String {
+    project_root().to_string_lossy().into_owned()
 }

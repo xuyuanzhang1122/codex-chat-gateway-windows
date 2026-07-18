@@ -75,6 +75,30 @@ const emptyStatus: GatewayStatus = {
 const GITHUB = "https://github.com/xuyuanzhang1122/codex-chat-gateway-windows";
 const LOBE_UI = "https://ui.lobehub.com";
 
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    const el = document.createElement("textarea");
+    el.value = text;
+    el.style.position = "fixed";
+    el.style.left = "-9999px";
+    document.body.appendChild(el);
+    el.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(el);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 function App() {
   const [splash, setSplash] = useState(true);
   const [splashExit, setSplashExit] = useState(false);
@@ -276,7 +300,13 @@ function App() {
                         pushLog("ERR", String(e));
                       }
                     }}
-                    onUi={() => void openUrl("http://127.0.0.1:4000/ui")}
+                    onUi={() => {
+                      const base = (status.endpoint || "http://127.0.0.1:4000/v1").replace(
+                        /\/v1\/?$/,
+                        "",
+                      );
+                      void openUrl(`${base}/ui`);
+                    }}
                   />
                 )}
 
@@ -318,6 +348,7 @@ function App() {
                       if (!selectedId) return;
                       const p = store.profiles.find((x) => x.id === selectedId);
                       if (!p) return;
+                      const wasDefault = p.id === store.default_id;
                       const ok = await ask(`删除「${p.name}」？`, {
                         title: "确认删除",
                         kind: "warning",
@@ -329,6 +360,19 @@ function App() {
                         setStore(await api.removeModel(selectedId));
                         setSelectedId(null);
                         pushLog("OK", `已删除 ${p.name}`);
+                        if (live && wasDefault) {
+                          const yes = await ask(
+                            "删除的是默认模型。是否立即重启网关以应用新的默认配置？",
+                            {
+                              title: "重启网关",
+                              kind: "info",
+                              okLabel: "重启",
+                              cancelLabel: "稍后",
+                            },
+                          );
+                          if (yes) void api.restart();
+                          else pushLog("DIM", "稍后请手动重启网关");
+                        }
                       } catch (e) {
                         pushLog("ERR", String(e));
                       }
@@ -336,8 +380,11 @@ function App() {
                     onRefresh={() =>
                       void api
                         .listModels()
-                        .then(setStore)
-                        .then(() => pushLog("OK", "模型列表已刷新"))
+                        .then((m) => {
+                          setStore(m);
+                          pushLog("OK", "模型列表已刷新");
+                        })
+                        .catch((e) => pushLog("ERR", `刷新失败: ${String(e)}`))
                     }
                   />
                 )}
@@ -385,13 +432,16 @@ function App() {
                 )}
 
                 {page === "activity" && (
-                  <ActivityView logs={logs} onClear={() => setLogs([])} onCopy={() => {
-                    const text = logs.map((l) => `${l.level}  ${l.message}`).join("\n");
-                    void navigator.clipboard.writeText(text).then(
-                      () => pushLog("OK", "已复制日志"),
-                      () => pushLog("ERR", "复制失败"),
-                    );
-                  }} />
+                  <ActivityView
+                    logs={logs}
+                    onClear={() => setLogs([])}
+                    onCopy={() => {
+                      const text = logs.map((l) => `${l.level}  ${l.message}`).join("\n");
+                      void copyText(text).then((ok) =>
+                        pushLog(ok ? "OK" : "ERR", ok ? "已复制日志" : "复制失败"),
+                      );
+                    }}
+                  />
                 )}
               </div>
 

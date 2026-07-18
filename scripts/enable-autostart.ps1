@@ -1,5 +1,14 @@
 $ErrorActionPreference = 'Stop'
-$projectRoot = Split-Path -Parent $PSScriptRoot
+if (-not $PSScriptRoot) {
+    if ($MyInvocation.MyCommand.Path) {
+        $PSScriptRoot = Split-Path -Parent -LiteralPath $MyInvocation.MyCommand.Path
+    } elseif ($env:CODEX_CHAT_GATEWAY_ROOT) {
+        $PSScriptRoot = Join-Path $env:CODEX_CHAT_GATEWAY_ROOT 'scripts'
+    } else {
+        throw 'PSScriptRoot is empty; cannot locate scripts directory.'
+    }
+}
+$projectRoot = if ($env:CODEX_CHAT_GATEWAY_ROOT) { $env:CODEX_CHAT_GATEWAY_ROOT } else { Split-Path -Parent $PSScriptRoot }
 . (Join-Path $PSScriptRoot 'model-store.ps1')
 try { Set-DefaultModelEnvironment -ProjectRoot $projectRoot | Out-Null }
 catch { Write-Host $_.Exception.Message; Write-Host 'Configure a model before enabling autostart.'; exit 1 }
