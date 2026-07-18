@@ -8,7 +8,8 @@
 - **Studio 安装器** `scripts/build-tauri-installer.ps1` + `installer/CodexChatGateway-Studio.iss`：深色 Inno 安装包，可选**安装前卸载旧 C# 版**。
 - 应用内与 README 署名：GitHub `xuyuanzhang1122/codex-chat-gateway-windows`、LobeHub UI、LiteLLM。
 - 网关启停修复：无 state 回退杀进程、路由身份校验、端口占用拒绝、运行中补写 state；恢复配置确认、改模型提示重启。
-- 文档 `docs/RELEASE_AND_UPDATES.md`：GitHub Release 流程与后续自动更新规划。
+- **自动更新**：Tauri Updater + minisign；HTTPS GitHub `latest.json`；客户端页「检查更新」；启动静默探测；`scripts/build-updater-artifacts.ps1` / `generate-updater-keys.ps1`。
+- 文档 `docs/RELEASE_AND_UPDATES.md`：Release 与签名更新通道说明。
 - 新增品牌化深色 Windows 安装包：中英文界面、用户级安装、快捷方式/登录自启选项及可选择的数据清理卸载流程。
 - 桌面控制台改为自适应 WPF 界面，新增高 DPI 支持、玻璃卡片和可交互粒子背景。
 - 新增网关重启、PID/运行时长/当前模型状态、实时脚本输出与登录自启状态开关。

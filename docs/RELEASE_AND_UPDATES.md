@@ -5,6 +5,7 @@
 | 产物 | 命令 | 说明 |
 |---|---|---|
 | **Studio 安装包**（推荐） | `.\构建Studio安装器.bat` 或 `.\scripts\build-tauri-installer.ps1` | **Tauri + LobeHub** 控制台 + LiteLLM runtime，可选卸载旧 C# 版 |
+| **Studio 自动更新包** | `.\scripts\build-updater-artifacts.ps1` | 签名 NSIS zip + `latest.json`（应用内检查更新） |
 | 旧便携包 / 旧安装包 | `build-portable.ps1` / `build-installer.ps1` | **仅遗留 C#/WPF**，不要当 Studio 用 |
 
 ### 如何确认是 Studio 而不是旧版
@@ -48,31 +49,82 @@ dist-installer/CodexChatGateway-Studio-Setup-vX.Y.Z.exe.sha256
 
 ## GitHub Release 建议流程
 
-1. 更新 `VERSION`（与 `desktop-tauri/src-tauri/tauri.conf.json` 一致）
+1. 更新 `VERSION`（与 `desktop-tauri/src-tauri/tauri.conf.json` / `package.json` 一致）
 2. `git tag vX.Y.Z && git push origin vX.Y.Z`
-3. CI 或本机：
+3. 本机构建：
 
 ```powershell
+# 完整 Studio 安装包（首次安装 / 含 runtime）
 .\scripts\build-tauri-installer.ps1
+
+# 应用内自动更新包（需签名私钥）
+$env:TAURI_SIGNING_PRIVATE_KEY_PATH = "$env:USERPROFILE\.codex-chat-gateway\tauri-updater.key"
+.\scripts\build-updater-artifacts.ps1
 ```
 
 4. 在 [Releases](https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases) 上传：
-   - `CodexChatGateway-Studio-Setup-vX.Y.Z.exe`
-   - 同名 `.sha256`
 
-## 自动更新（下一阶段）
+| 文件 | 用途 |
+|---|---|
+| `CodexChatGateway-Studio-Setup-vX.Y.Z.exe` | 完整安装 |
+| 同名 `.sha256` | 校验 |
+| `CodexChatGateway-Studio-Updater-vX.Y.Z-windows-x86_64.nsis.zip` | 应用内更新载荷 |
+| 同名 `.sig` | 签名旁路（可选单独上传） |
+| **`latest.json`** | 更新清单（必须，文件名固定） |
 
-计划使用 **Tauri Updater**：
+`latest.json` 由构建脚本生成，示意：
 
-1. `cargo tauri signer generate` 生成密钥对  
-2. 在 `tauri.conf.json` → `plugins.updater` 填入 `pubkey` 与 endpoints  
-3. Release 附带 `latest.json`（version、platforms、url、signature）  
-4. 控制台「检查更新」：下载 → 校验签名 → 静默替换 → 提示重启控制台  
+```json
+{
+  "version": "1.3.1",
+  "notes": "…",
+  "pub_date": "2026-07-18T12:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "<minisign signature>",
+      "url": "https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/download/v1.3.1/CodexChatGateway-Studio-Updater-v1.3.1-windows-x86_64.nsis.zip"
+    }
+  }
+}
+```
 
-**约束（与 AGENTS.md 一致）**：
+应用固定读取：
+
+```text
+https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/latest/download/latest.json
+```
+
+因此 **每个最新 Release 都必须包含名为 `latest.json` 的附件**（覆盖上传即可）。
+
+## 自动更新（已实现）
+
+基于 **Tauri Updater 2** + minisign：
+
+| 环节 | 说明 |
+|---|---|
+| 通道 | 仅 HTTPS GitHub Releases |
+| 公钥 | `desktop-tauri/src-tauri/tauri.conf.json` → `plugins.updater.pubkey`（可提交） |
+| 私钥 | 本机 `%USERPROFILE%\.codex-chat-gateway\tauri-updater.key` 或 CI Secret `TAURI_SIGNING_PRIVATE_KEY`（**禁止提交**） |
+| 控制台入口 | 「客户端」页 → **检查更新** |
+| 启动 | 静默检查一次；有新版本仅写日志，不自动下载 |
+| 用户数据 | **不修改** `.gateway/models.json` 与 API Key |
+| 网关进程 | 更新控制台不会默认停止网关 |
+
+### 首次生成密钥
+
+```powershell
+.\scripts\generate-updater-keys.ps1
+```
+
+将打印的 **公钥** 写入 `tauri.conf.json` 的 `plugins.updater.pubkey`（若与仓库内已有公钥不同，则所有已发布客户端将无法验证新签名，一般不要轮换）。
+
+### 约束（与 AGENTS.md 一致）
 
 - 更新通道仅 HTTPS GitHub Releases  
-- 不在更新日志中写入 API Key  
+- 不在更新日志 / notes 中写入 API Key  
 - 更新后默认不改 `.gateway/models.json`  
+- 签名私钥不得进入仓库、示例或日志  
 
-当前仓库已预留文档位置；`pubkey` 未写入配置，避免空公钥导致运行失败。
+### 开发机注意
+
+`tauri dev` 通常无法完整走安装式更新；请用 **安装版 / NSIS 包** 验证「检查更新」。无网络或尚未上传 `latest.json` 时，检查会提示不可用或已是最新。

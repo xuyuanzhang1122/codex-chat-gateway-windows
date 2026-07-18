@@ -39,11 +39,15 @@ import {
   Star,
   Trash2,
   Users,
+  Download,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { api } from "./api";
 import { TitleBar } from "./TitleBar";
+import { installKnownUpdate, type UpdateProgress } from "./updater";
 import type {
   GatewayStatus,
   LogLevel,
@@ -51,6 +55,7 @@ import type {
   ModelInput,
   ModelProfile,
   ModelStore,
+  ParsedApiText,
   ProjectInfo,
 } from "./types";
 
@@ -68,7 +73,9 @@ type ActionKey =
   | "autostart"
   | "logs"
   | "default"
-  | "delete";
+  | "delete"
+  | "import"
+  | "update";
 
 type Feedback = {
   key: ActionKey;
@@ -150,8 +157,10 @@ function App() {
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
   const [notice, setNotice] = useState<NoticeRequest | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
   const pendingKey = useRef<ActionKey | null>(null);
   const feedbackTimer = useRef<number | null>(null);
+  const autoUpdateChecked = useRef(false);
   const ready = !splash;
 
   const confirm = useCallback(
@@ -222,7 +231,33 @@ function App() {
       }
 
       const u1 = await listen<GatewayStatus>("gateway://status", (e) => {
-        setStatus(e.payload);
+        const st = e.payload;
+        setStatus(st);
+        // Unstick loading UI if backend finished busy but action event was missed.
+        const key = pendingKey.current;
+        if (key && !st.busy && (key === "start" || key === "stop" || key === "restart")) {
+          if (key === "stop" && !st.running && !st.healthy) {
+            showFeedback({ key, state: "ok", message: st.message || "网关已停止" });
+            pendingKey.current = null;
+          } else if (key === "start" && st.running && st.healthy) {
+            showFeedback({ key, state: "ok", message: st.message || "网关已启动" });
+            pendingKey.current = null;
+          } else if (key === "restart" && st.running && st.healthy && st.phase === "running") {
+            showFeedback({ key, state: "ok", message: st.message || "网关已重启" });
+            pendingKey.current = null;
+          } else if (
+            (key === "stop" || key === "start" || key === "restart") &&
+            st.phase === "error" &&
+            !st.busy
+          ) {
+            showFeedback({
+              key,
+              state: "err",
+              message: st.message || "操作失败",
+            });
+            pendingKey.current = null;
+          }
+        }
       });
       const u2 = await listen<{ level: string; message: string }>("gateway://log", (e) => {
         const lv = (e.payload.level || "DIM").toUpperCase() as LogLevel;
@@ -234,21 +269,52 @@ function App() {
       const u3 = await listen<{ ok: boolean; message: string }>("gateway://action", (e) => {
         const key = pendingKey.current;
         if (key) {
+          const raw = e.payload.message || "";
+          const mapped =
+            raw === "still running"
+              ? "停止失败：端口仍有响应"
+              : raw === "Gateway stopped"
+                ? "网关已停止"
+                : raw === "Gateway started"
+                  ? "网关已启动"
+                  : raw === "Gateway already running"
+                    ? "网关已在运行"
+                    : raw || (e.payload.ok ? "完成" : "失败");
           showFeedback({
             key,
             state: e.payload.ok ? "ok" : "err",
-            message: e.payload.ok
-              ? e.payload.message || "完成"
-              : e.payload.message || "失败",
+            message: mapped,
           });
           pendingKey.current = null;
         }
+        // Always refresh status after lifecycle actions so buttons re-enable correctly.
+        void api.status().then(setStatus).catch(() => undefined);
         if (e.payload.ok) {
           void api.listModels().then(setStore).catch(() => undefined);
           void api.projectInfo().then(setInfo).catch(() => undefined);
         }
       });
       unsubs = [u1, u2, u3];
+
+      // Quiet background check — never auto-download; only notify in logs.
+      if (!autoUpdateChecked.current) {
+        autoUpdateChecked.current = true;
+        void checkUpdate()
+          .then((u) => {
+            if (u) {
+              pushLog(
+                "INFO",
+                `发现新版本 ${u.version}（当前 ${u.currentVersion}）· 可在「客户端」页检查更新`,
+              );
+            } else {
+              pushLog("DIM", "已检查更新：当前为最新控制台版本");
+            }
+          })
+          .catch(() => {
+            // Offline / missing latest.json / dev build — do not alarm.
+            pushLog("DIM", "更新检查暂不可用（需安装版 + GitHub Release 通道）");
+          });
+      }
     })();
 
     return () => {
@@ -264,7 +330,10 @@ function App() {
 
   const hasDefault = store.profiles.some((p) => p.id === store.default_id);
   const busy = status.busy || feedback?.state === "loading";
+  // Prefer our-gateway running state; foreign port occupancy should not look "fully live"
+  // for stop/restart unless health is true (user still needs a way to stop ours).
   const live = status.running || status.healthy;
+  const canStop = live || status.phase === "running" || status.phase === "error";
 
   const onStart = () => {
     if (!hasDefault) {
@@ -375,12 +444,16 @@ function App() {
                     store={store}
                     busy={busy}
                     live={live}
+                    canStop={canStop}
                     feedback={feedback}
                     recentLogs={logs.slice(-12)}
                     onStart={onStart}
                     onStop={() => {
                       beginAction("stop", "正在停止网关…");
-                      void api.stop();
+                      void api.stop().catch((e) => {
+                        showFeedback({ key: "stop", state: "err", message: String(e) });
+                        pendingKey.current = null;
+                      });
                     }}
                     onRestart={() => {
                       if (!hasDefault) {
@@ -393,13 +466,17 @@ function App() {
                         return;
                       }
                       beginAction("restart", "正在重启网关…");
-                      void api.restart();
+                      void api.restart().catch((e) => {
+                        showFeedback({ key: "restart", state: "err", message: String(e) });
+                        pendingKey.current = null;
+                      });
                     }}
                     onCheck={() => {
                       void (async () => {
                         beginAction("check", "正在健康检查…");
                         try {
                           const r = await api.check();
+                          setStatus(r.status);
                           showFeedback({
                             key: "check",
                             state: r.ok ? "ok" : "err",
@@ -450,6 +527,58 @@ function App() {
                     feedback={feedback}
                     onSelect={setSelectedId}
                     onAdd={() => setDialog({ mode: "add" })}
+                    onImport={() => {
+                      void (async () => {
+                        try {
+                          const picked = await open({
+                            multiple: false,
+                            filters: [
+                              { name: "模型配置", extensions: ["txt", "env", "conf", "ini"] },
+                              { name: "全部文件", extensions: ["*"] },
+                            ],
+                            title: "导入模型配置（api.txt）",
+                          });
+                          if (!picked || Array.isArray(picked)) return;
+                          beginAction("import", "正在解析配置…");
+                          const parsed = await api.parseModelFile(picked);
+                          const models = await resolveImportModels(parsed, confirm, pushLog);
+                          if (!models || models.length === 0) {
+                            showFeedback({
+                              key: "import",
+                              state: "err",
+                              message: "未选择任何模型",
+                            });
+                            pendingKey.current = null;
+                            return;
+                          }
+                          const next = await api.importModelProfiles(
+                            parsed.base_url,
+                            parsed.api_key,
+                            models,
+                            parsed.name_hint,
+                          );
+                          setStore(next);
+                          showFeedback({
+                            key: "import",
+                            state: "ok",
+                            message: `已导入 ${models.length} 个模型`,
+                          });
+                          pendingKey.current = null;
+                          pushLog(
+                            "OK",
+                            `已从文本导入 ${models.length} 个模型 · ${parsed.base_url}`,
+                          );
+                        } catch (e) {
+                          showFeedback({
+                            key: "import",
+                            state: "err",
+                            message: String(e),
+                          });
+                          pendingKey.current = null;
+                          pushLog("ERR", `导入失败: ${String(e)}`);
+                        }
+                      })();
+                    }}
                     onEdit={() => {
                       const id =
                         selectedId || store.default_id || store.profiles[0]?.id || null;
@@ -556,7 +685,9 @@ function App() {
                   <ClientsView
                     busy={busy}
                     autostart={!!info?.autostart}
+                    version={info?.version}
                     feedback={feedback}
+                    updateProgress={updateProgress}
                     onScript={(key, label, script, confirmText) => {
                       void (async () => {
                         if (confirmText) {
@@ -604,6 +735,71 @@ function App() {
                           showFeedback({ key: "autostart", state: "err", message: String(e) });
                           pendingKey.current = null;
                           pushLog("ERR", String(e));
+                        }
+                      })();
+                    }}
+                    onCheckUpdate={() => {
+                      void (async () => {
+                        beginAction("update", "正在检查更新…");
+                        setUpdateProgress({
+                          phase: "checking",
+                          downloaded: 0,
+                          total: null,
+                          message: "正在连接 GitHub Release…",
+                        });
+                        try {
+                          const update = await checkUpdate();
+                          if (!update) {
+                            setUpdateProgress(null);
+                            showFeedback({
+                              key: "update",
+                              state: "ok",
+                              message: "已是最新版本",
+                            });
+                            pendingKey.current = null;
+                            pushLog("OK", "已是最新版本");
+                            return;
+                          }
+                          const notes = (update.body || "").trim();
+                          const yes = await confirm({
+                            title: `发现新版本 ${update.version}`,
+                            content:
+                              `当前 ${update.currentVersion} → ${update.version}\n\n` +
+                              (notes ? `${notes.slice(0, 600)}\n\n` : "") +
+                              "将从 HTTPS GitHub Release 下载并校验签名后安装。\n" +
+                              "不会修改 .gateway 模型密钥；网关进程不会因此被停止。\n" +
+                              "安装后会重启控制台。",
+                            okText: "下载并安装",
+                            cancelText: "稍后",
+                          });
+                          if (!yes) {
+                            setUpdateProgress(null);
+                            showFeedback({
+                              key: "update",
+                              state: "ok",
+                              message: "已取消更新",
+                            });
+                            pendingKey.current = null;
+                            await update.close().catch(() => undefined);
+                            return;
+                          }
+                          pushLog("INFO", `▶ 更新至 ${update.version}`);
+                          await installKnownUpdate(update, (p) => {
+                            setUpdateProgress(p);
+                            if (p.phase === "downloading" || p.phase === "installing") {
+                              showFeedback({
+                                key: "update",
+                                state: "loading",
+                                message: p.message,
+                              });
+                            }
+                          });
+                        } catch (e) {
+                          setUpdateProgress(null);
+                          const msg = String(e);
+                          showFeedback({ key: "update", state: "err", message: msg });
+                          pendingKey.current = null;
+                          pushLog("ERR", `更新失败: ${msg}`);
                         }
                       })();
                     }}
@@ -813,6 +1009,7 @@ function GatewayView({
   store,
   busy,
   live,
+  canStop,
   feedback,
   recentLogs,
   onStart,
@@ -826,6 +1023,7 @@ function GatewayView({
   store: ModelStore;
   busy: boolean;
   live: boolean;
+  canStop: boolean;
   feedback: Feedback | null;
   recentLogs: LogLine[];
   onStart: () => void;
@@ -844,6 +1042,17 @@ function GatewayView({
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [recentLogs]);
 
+  const statusLabel =
+    status.phase === "stopping"
+      ? "停止中…"
+      : status.phase === "starting"
+        ? "启动中…"
+        : live
+          ? status.is_our_gateway
+            ? "运行中"
+            : "端口占用"
+          : "已停止";
+
   return (
     <Flexbox gap={12} style={{ height: "100%", minHeight: 0 }}>
       {!status.is_our_gateway && status.healthy && (
@@ -860,7 +1069,7 @@ function GatewayView({
             状态
           </Text>
           <Text fontSize={22} weight={700} style={{ marginTop: 8 }}>
-            {live ? (status.is_our_gateway ? "运行中" : "端口占用") : "已停止"}
+            {statusLabel}
           </Text>
           <Text type="secondary" fontSize={12} style={{ marginTop: 8 }}>
             {status.message}
@@ -911,7 +1120,7 @@ function GatewayView({
             <Button
               icon={Square}
               loading={isLoading(feedback, "stop") || status.phase === "stopping"}
-              disabled={busy || !live}
+              disabled={status.busy || status.phase === "stopping" || !canStop}
               onClick={onStop}
             >
               停止
@@ -992,6 +1201,50 @@ function GatewayView({
   );
 }
 
+async function resolveImportModels(
+  parsed: ParsedApiText,
+  confirm: (opts: Omit<ConfirmRequest, "resolve">) => Promise<boolean>,
+  pushLog: (level: LogLevel, msg: string) => void,
+): Promise<string[] | null> {
+  if (parsed.models.length > 0) {
+    pushLog("DIM", `识别到 ${parsed.models.length} 个模型 ID`);
+    return parsed.models;
+  }
+  const yes = await confirm({
+    title: "未检测到模型",
+    content:
+      "配置文件中 model 为空或未填写。是否在线拉取模型列表？\n\n" +
+      `接口：${parsed.base_url}`,
+    okText: "在线拉取",
+    cancelText: "取消导入",
+  });
+  if (!yes) return null;
+  pushLog("INFO", `▶ 在线拉取模型 · ${parsed.base_url}`);
+  try {
+    const ids = await api.fetchModels(parsed.base_url, parsed.api_key);
+    if (ids.length === 0) {
+      pushLog("ERR", "在线列表为空");
+      return null;
+    }
+    // Import all listed models; user can delete unused later.
+    // Cap very large catalogs to keep store manageable.
+    const capped = ids.slice(0, 40);
+    if (ids.length > capped.length) {
+      pushLog("DIM", `接口返回 ${ids.length} 个模型，仅导入前 ${capped.length} 个`);
+    }
+    const ok = await confirm({
+      title: "确认导入",
+      content: `将导入 ${capped.length} 个模型到本地配置（可稍后删除/设默认）。`,
+      okText: "导入",
+      cancelText: "取消",
+    });
+    return ok ? capped : null;
+  } catch (e) {
+    pushLog("ERR", String(e));
+    throw e;
+  }
+}
+
 function ModelsView({
   store,
   selectedId,
@@ -999,6 +1252,7 @@ function ModelsView({
   feedback,
   onSelect,
   onAdd,
+  onImport,
   onEdit,
   onDefault,
   onDelete,
@@ -1010,6 +1264,7 @@ function ModelsView({
   feedback: Feedback | null;
   onSelect: (id: string) => void;
   onAdd: () => void;
+  onImport: () => void;
   onEdit: () => void;
   onDefault: () => void;
   onDelete: () => void;
@@ -1027,6 +1282,9 @@ function ModelsView({
           <Button type="primary" icon={Plus} disabled={busy} onClick={onAdd}>
             添加模型
           </Button>
+          <Button disabled={busy} loading={isLoading(feedback, "import")} onClick={onImport}>
+            导入 txt
+          </Button>
           <Button icon={RefreshCw} disabled={busy} onClick={onRefresh}>
             刷新
           </Button>
@@ -1034,15 +1292,29 @@ function ModelsView({
       </Flexbox>
 
       {store.profiles.length === 0 ? (
-        <Empty
-          title="还没有上游模型"
-          description="添加 DeepSeek / Kimi 等 Chat Completions 接口"
-          action={
-            <Button type="primary" icon={Plus} onClick={onAdd}>
-              立即添加
-            </Button>
-          }
-        />
+        <>
+          <Empty
+            title="还没有上游模型"
+            description="手动添加，或导入 baseurl/key/model 文本配置"
+            action={
+              <Flexbox horizontal gap={8}>
+                <Button type="primary" icon={Plus} onClick={onAdd}>
+                  立即添加
+                </Button>
+                <Button
+                  loading={isLoading(feedback, "import")}
+                  disabled={busy}
+                  onClick={onImport}
+                >
+                  导入 txt
+                </Button>
+              </Flexbox>
+            }
+          />
+          <FeedbackAlert
+            feedback={feedback && feedback.key === "import" ? feedback : null}
+          />
+        </>
       ) : (
         <>
           <Flexbox gap={10} horizontal style={{ flexWrap: "wrap" }}>
@@ -1118,7 +1390,9 @@ function ModelsView({
           </Flexbox>
           <FeedbackAlert
             feedback={
-              feedback && ["default", "delete"].includes(feedback.key) ? feedback : null
+              feedback && ["default", "delete", "import"].includes(feedback.key)
+                ? feedback
+                : null
             }
           />
         </>
@@ -1130,13 +1404,18 @@ function ModelsView({
 function ClientsView({
   busy,
   autostart,
+  version,
   feedback,
+  updateProgress,
   onScript,
   onAutostart,
+  onCheckUpdate,
 }: {
   busy: boolean;
   autostart: boolean;
+  version?: string;
   feedback: Feedback | null;
+  updateProgress: UpdateProgress | null;
   onScript: (
     key: ActionKey,
     label: string,
@@ -1144,7 +1423,14 @@ function ClientsView({
     confirm?: string,
   ) => void;
   onAutostart: () => void;
+  onCheckUpdate: () => void;
 }) {
+  const updateLoading = isLoading(feedback, "update");
+  const pct =
+    updateProgress?.total && updateProgress.total > 0
+      ? Math.min(100, Math.round((updateProgress.downloaded / updateProgress.total) * 100))
+      : null;
+
   return (
     <Flexbox gap={12} style={{ height: "100%" }}>
       <Flexbox horizontal gap={12} style={{ flexWrap: "wrap" }}>
@@ -1248,12 +1534,55 @@ function ClientsView({
         </Flexbox>
       </Block>
 
+      <Block variant="outlined" padding={18}>
+        <Flexbox gap={12}>
+          <Flexbox horizontal distribution="space-between" align="center" gap={12}>
+            <Flexbox gap={4}>
+              <Text weight={700} fontSize={16}>
+                自动更新
+              </Text>
+              <Text type="secondary" fontSize={13}>
+                HTTPS GitHub Release · 签名校验 · 当前 {version || "—"}
+              </Text>
+            </Flexbox>
+            <Button
+              type="primary"
+              icon={Download}
+              loading={updateLoading}
+              disabled={busy && !updateLoading}
+              onClick={onCheckUpdate}
+            >
+              检查更新
+            </Button>
+          </Flexbox>
+          {updateProgress && (
+            <Alert
+              type={updateProgress.phase === "done" ? "success" : "info"}
+              showIcon
+              message={
+                pct != null
+                  ? `${updateProgress.message} · ${pct}%`
+                  : updateProgress.message
+              }
+            />
+          )}
+          <Text type="secondary" fontSize={12}>
+            仅更新 Studio 控制台安装包；不会改写 .gateway 模型配置，也不会因更新自动停止网关。
+          </Text>
+        </Flexbox>
+      </Block>
+
       <FeedbackAlert
         feedback={
           feedback &&
-          ["codex-cfg", "codex-restore", "claude-cfg", "claude-restore", "autostart"].includes(
-            feedback.key,
-          )
+          [
+            "codex-cfg",
+            "codex-restore",
+            "claude-cfg",
+            "claude-restore",
+            "autostart",
+            "update",
+          ].includes(feedback.key)
             ? feedback
             : null
         }

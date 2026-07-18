@@ -10,6 +10,25 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+
+# Get-FileHash can be unavailable when PSModulePath points at incompatible
+# PowerShell 7 module manifests; compute SHA-256 via .NET instead.
+function Get-Sha256Hash {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
 if (-not $OutputDirectory) {
     $OutputDirectory = Join-Path $projectRoot 'dist-installer'
 }
@@ -219,7 +238,7 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installerPath)) {
     throw 'Studio installer compilation failed.'
 }
 
-$hash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash
+$hash = Get-Sha256Hash -Path $installerPath
 [IO.File]::WriteAllText($hashPath, "$hash  $([IO.Path]::GetFileName($installerPath))`n", $utf8)
 
 Write-Host ''

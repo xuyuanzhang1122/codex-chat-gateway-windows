@@ -16,3 +16,10 @@ desktop/assets/*-chroma.png
 desktop-tauri/node_modules/
 desktop-tauri/dist/
 desktop-tauri/src-tauri/target/
+# Tauri updater signing keys — never commit private keys
+*.key
+!**/icons/**
+tauri-updater.key
+tauri-updater.key.pub
+**/*updater*.key
+**/*updater*.key.pub

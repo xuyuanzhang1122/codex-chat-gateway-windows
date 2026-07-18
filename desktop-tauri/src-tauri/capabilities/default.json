@@ -17,6 +17,8 @@
     "core:window:allow-hide",
     "core:window:allow-unminimize",
     "opener:default",
-    "dialog:default"
+    "dialog:default",
+    "updater:default",
+    "process:default"
   ]
 }

@@ -15,4 +15,5 @@
 - 新桌面控制台优先维护 `desktop-tauri/`（Tauri 2 + React）；网关仍只监听 `127.0.0.1`，密钥不得写入前端静态资源或客户端配置。
 - 旧版 WPF（`desktop/GatewayDesktop.cs` / `CodexChatGateway.exe`）在 Tauri 版稳定前可并存，勿在未确认分发策略前删除。
 - Studio 安装包由 `scripts/build-tauri-installer.ps1` 构建；关闭控制台不得默认杀掉网关进程。
-- 自动更新仅允许 HTTPS Release 通道，签名密钥不得提交进仓库。
+- 自动更新仅允许 HTTPS GitHub Release 通道（`latest.json` + 签名 NSIS 包）；公钥可进仓库，**私钥不得提交**（用 `TAURI_SIGNING_PRIVATE_KEY` / `_PATH`）。
+- 更新不得改写 `.gateway/models.json` 或日志中的密钥；更新控制台不得默认杀掉网关进程。

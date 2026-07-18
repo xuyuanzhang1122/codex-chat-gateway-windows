@@ -60,6 +60,19 @@ npm run tauri build
 
 也可从仓库根目录双击 `桌面版-Tauri.bat`（开发机需已 `npm install`）。
 
+## 自动更新
+
+- 配置：`src-tauri/tauri.conf.json` → `plugins.updater`（公钥 + GitHub `latest.json` 端点）
+- 控制台：「客户端」→ **检查更新**（下载 → 验签 → 安装 → 重启控制台）
+- 发布更新包（仓库根目录）：
+
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY_PATH = "$env:USERPROFILE\.codex-chat-gateway\tauri-updater.key"
+.\scripts\build-updater-artifacts.ps1
+```
+
+私钥不得提交；详见 `docs/RELEASE_AND_UPDATES.md`。
+
 ## 与旧桌面版关系
 
 | | WPF (`CodexChatGateway.exe`) | Tauri（本目录） |

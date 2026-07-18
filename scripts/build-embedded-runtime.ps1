@@ -8,6 +8,25 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+
+# Get-FileHash can be unavailable when PSModulePath points at incompatible
+# PowerShell 7 module manifests; compute SHA-256 via .NET instead.
+function Get-Sha256Hash {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
 $dest = [IO.Path]::GetFullPath($DestinationRuntimeDir)
 
 $buildCache = Join-Path $projectRoot '.portable-build'
@@ -17,7 +36,7 @@ if (-not (Test-Path -LiteralPath $pythonArchive)) {
     Write-Host 'Downloading official CPython 3.11.9 embeddable x64...'
     Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' -OutFile $pythonArchive -UseBasicParsing
 }
-$pythonHash = (Get-FileHash -LiteralPath $pythonArchive -Algorithm SHA256).Hash
+$pythonHash = Get-Sha256Hash -Path $pythonArchive
 if ($pythonHash -ne '009D6BF7E3B2DDCA3D784FA09F90FE54336D5B60F0E0F305C37F400BF83CFD3B') {
     throw "Unexpected embedded Python SHA-256: $pythonHash"
 }

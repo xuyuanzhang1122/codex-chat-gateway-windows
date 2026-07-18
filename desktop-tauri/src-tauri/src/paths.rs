@@ -73,17 +73,15 @@ pub fn strip_extended_prefix(path: PathBuf) -> PathBuf {
 
 /// Normalize path text for comparison (no extended prefix, backslashes, lowercase ASCII).
 pub fn normalize_path_text(path: &Path) -> String {
-    let cleaned = strip_extended_prefix(path.to_path_buf());
-    cleaned
-        .to_string_lossy()
-        .replace('/', "\\")
-        .to_ascii_lowercase()
+    normalize_text(&path.to_string_lossy())
 }
 
 /// Normalize free-form cmdline / path strings the same way as [`normalize_path_text`].
+/// Strips **all** Windows extended-length markers (`\\?\` / `//?/`), not only a leading one —
+/// process command lines often embed them mid-string after quoted argv[0].
 pub fn normalize_text(s: &str) -> String {
-    s.trim_start_matches(r"\\?\")
-        .trim_start_matches("//?/")
+    s.replace(r"\\?\", "")
+        .replace("//?/", "")
         .replace('/', "\\")
         .to_ascii_lowercase()
 }

@@ -28,11 +28,12 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: asset: https://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:4000"
+      "csp": "default-src 'self'; img-src 'self' data: asset: https://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:4000 https://github.com https://*.github.com https://objects.githubusercontent.com https://release-assets.githubusercontent.com"
     }
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
@@ -44,6 +45,10 @@
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
       }
     },
     "publisher": "xuyuanzhang1122",
@@ -51,5 +56,16 @@
     "category": "DeveloperTool",
     "shortDescription": "Local model bridge for Codex and Claude Desktop",
     "longDescription": "Codex Chat Gateway Studio — LiteLLM local bridge with Tauri desktop console."
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRBRUJGQjRFOTY0RUIyQzQKUldURXNrNldUdnZyU2h2VDF4T1RxRTQrVW5yL3dhNHBQOGtTcW5KLzZjSHAyNFBRWXZwOUI0cXQK",
+      "endpoints": [
+        "https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

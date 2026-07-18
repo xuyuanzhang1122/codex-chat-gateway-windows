@@ -189,14 +189,25 @@ impl GatewayManager {
         if healthy {
             g.status.healthy = true;
             g.status.running = true;
-            g.status.is_our_gateway = true;
+            // Light probe cannot list routes; keep previous is_our_gateway unless unknown.
             if g.status.phase == GatewayPhase::Stopped || g.status.phase == GatewayPhase::Error {
                 g.status.phase = GatewayPhase::Running;
+                // Assume ours when we have a state/pid match; full check refines later.
+                if g.status.pid.is_none() {
+                    g.status.is_our_gateway = read_state_file(&project_root())
+                        .map(|f| pid_alive(f.pid) && process_is_our_gateway(&project_root(), f.pid))
+                        .unwrap_or(true);
+                }
             }
             if g.status.phase == GatewayPhase::Starting {
                 g.status.phase = GatewayPhase::Running;
             }
-            g.status.message = "运行中".into();
+            if g.status.message.is_empty()
+                || g.status.message == "网关未在运行"
+                || g.status.message == "检测中…"
+            {
+                g.status.message = "运行中".into();
+            }
             // Fill pid from state file once if missing
             if g.status.pid.is_none() {
                 if let Some(file) = read_state_file(&project_root()) {
@@ -204,6 +215,8 @@ impl GatewayManager {
                         g.status.pid = Some(file.pid);
                         g.status.model = Some(file.model);
                         g.status.started_at = Some(file.started_at);
+                        g.status.is_our_gateway =
+                            process_is_our_gateway(&project_root(), file.pid);
                     }
                 }
             } else if let Some(pid) = g.status.pid {
@@ -421,7 +434,7 @@ impl GatewayManager {
                 }
                 emit_log(app, "OK", "网关已在运行，已同步状态");
                 emit_status(app, &self.snapshot());
-                emit_action(app, true, "Gateway already running");
+                emit_action(app, true, "网关已在运行");
                 return;
             }
             {
@@ -435,7 +448,7 @@ impl GatewayManager {
             }
             emit_log(app, "ERR", "端口 4000 被其他服务占用，拒绝启动");
             emit_status(app, &self.snapshot());
-            emit_action(app, false, "port occupied");
+            emit_action(app, false, "端口 4000 被其他服务占用");
             return;
         }
 
@@ -588,7 +601,7 @@ impl GatewayManager {
             }
             emit_log(app, "ERR", "网关未能就绪，已回滚");
             emit_status(app, &self.snapshot());
-            emit_action(app, false, "start failed");
+            emit_action(app, false, "启动失败，见日志");
             return;
         }
 
@@ -613,7 +626,7 @@ impl GatewayManager {
             ),
         );
         emit_status(app, &self.snapshot());
-        emit_action(app, true, "Gateway started");
+        emit_action(app, true, "网关已启动");
     }
 
     fn fail_start(&self, app: &AppHandle, msg: &str) {
@@ -648,10 +661,11 @@ impl GatewayManager {
                 let pid = child.id();
                 // Still verify identity before kill — PID reuse is rare mid-session but cheap to check.
                 if process_is_our_gateway(&root, pid) {
-                    let _ = child.kill();
+                    if kill_pid_tree(pid) {
+                        killed.push(pid);
+                        emit_log(app, "DIM", &format!("已停止会话子进程 PID {pid}"));
+                    }
                     let _ = child.wait();
-                    killed.push(pid);
-                    emit_log(app, "DIM", &format!("已停止会话子进程 PID {pid}"));
                 } else {
                     emit_log(
                         app,
@@ -663,39 +677,61 @@ impl GatewayManager {
             }
         }
 
-        if let Some(st) = read_state_file(&root) {
-            if !killed.contains(&st.pid) {
-                if kill_verified(&root, st.pid, Some(&st.executable), Some(&st.runner)) {
-                    emit_log(app, "DIM", &format!("已停止 state PID {}", st.pid));
-                    killed.push(st.pid);
-                } else if pid_alive(st.pid) {
-                    emit_log(
-                        app,
-                        "DIM",
-                        &format!(
-                            "拒绝停止 PID {}：与 state 中的 exe/runner 身份不匹配（可能已复用）",
-                            st.pid
-                        ),
-                    );
+        // Multiple start paths (console / bat / autostart) can leave several run_gateway.py
+        // instances; stop must sweep all of them, not only the state-file PID.
+        for round in 0..4 {
+            if let Some(st) = read_state_file(&root) {
+                if !killed.contains(&st.pid) {
+                    if kill_verified(&root, st.pid, Some(&st.executable), Some(&st.runner)) {
+                        emit_log(app, "DIM", &format!("已停止 state PID {}", st.pid));
+                        killed.push(st.pid);
+                    } else if process_is_our_gateway(&root, st.pid) && kill_pid_tree(st.pid) {
+                        emit_log(
+                            app,
+                            "DIM",
+                            &format!("已停止 state PID {}（cmdline 身份）", st.pid),
+                        );
+                        killed.push(st.pid);
+                    } else if pid_alive(st.pid) && round == 0 {
+                        emit_log(
+                            app,
+                            "DIM",
+                            &format!(
+                                "state PID {} 未通过严格身份匹配，继续扫描发现路径",
+                                st.pid
+                            ),
+                        );
+                    }
                 }
             }
+
+            for pid in find_all_gateway_pids(&root) {
+                if killed.contains(&pid) {
+                    continue;
+                }
+                if kill_verified(&root, pid, None, None) {
+                    emit_log(app, "DIM", &format!("已停止发现的网关进程 PID {pid}"));
+                    killed.push(pid);
+                }
+            }
+
+            let _ = fs::remove_file(state_path(&root));
+            thread::sleep(Duration::from_millis(300 + round * 150));
+
+            if !health_probe(350) {
+                break;
+            }
+            if round < 3 {
+                emit_log(
+                    app,
+                    "DIM",
+                    &format!("端口仍有响应，第 {} 轮补杀…", round + 2),
+                );
+            }
         }
 
-        for pid in find_all_gateway_pids(&root) {
-            if killed.contains(&pid) {
-                continue;
-            }
-            // Discovery path: only kill when cmdline proves it is our project gateway.
-            if kill_verified(&root, pid, None, None) {
-                emit_log(app, "DIM", &format!("已停止发现的网关进程 PID {pid}"));
-                killed.push(pid);
-            }
-        }
-
-        let _ = fs::remove_file(state_path(&root));
-        thread::sleep(Duration::from_millis(250));
-
-        let still = health_probe(400);
+        let still = health_probe(500);
+        let leftover = find_all_gateway_pids(&root);
         {
             let mut g = self.inner.write();
             g.status.busy = false;
@@ -707,24 +743,54 @@ impl GatewayManager {
                 g.status.phase = GatewayPhase::Error;
                 g.status.running = true;
                 g.status.healthy = true;
-                g.status.message = "停止后端口仍有响应".into();
+                // Only mark as ours when we still see our runner; otherwise port is foreign.
+                g.status.is_our_gateway = !leftover.is_empty()
+                    || list_routes()
+                        .map(|r| is_our_gateway(&r))
+                        .unwrap_or(false);
+                g.status.message = if leftover.is_empty() {
+                    "停止后端口仍有响应（可能非本网关占用 4000）".into()
+                } else {
+                    format!(
+                        "停止未完成，仍有 {} 个网关相关进程",
+                        leftover.len()
+                    )
+                };
             } else {
                 g.status.phase = GatewayPhase::Stopped;
                 g.status.running = false;
                 g.status.healthy = false;
                 g.status.is_our_gateway = false;
-                g.status.message = "网关已停止".into();
+                g.status.message = if killed.is_empty() {
+                    "网关已停止".into()
+                } else {
+                    format!("网关已停止（结束 {} 个进程）", killed.len())
+                };
             }
         }
 
         if still {
-            emit_log(app, "ERR", "停止后健康检查仍通过");
+            emit_log(
+                app,
+                "ERR",
+                &format!(
+                    "停止后健康检查仍通过 · killed={killed:?} leftover={leftover:?}"
+                ),
+            );
             emit_status(app, &self.snapshot());
-            emit_action(app, false, "still running");
+            emit_action(app, false, "停止失败：端口 4000 仍有响应");
         } else {
-            emit_log(app, "OK", "网关已停止");
+            emit_log(
+                app,
+                "OK",
+                &if killed.is_empty() {
+                    "网关已停止".into()
+                } else {
+                    format!("网关已停止（结束 {} 个进程）", killed.len())
+                },
+            );
             emit_status(app, &self.snapshot());
-            emit_action(app, true, "Gateway stopped");
+            emit_action(app, true, "网关已停止");
         }
     }
 
@@ -760,6 +826,7 @@ impl GatewayManager {
 
 fn emit_status(app: &AppHandle, status: &GatewayStatus) {
     let _ = app.emit("gateway://status", status);
+    crate::sync_tray(app, status);
 }
 
 fn emit_log(app: &AppHandle, level: &str, message: &str) {
@@ -891,13 +958,37 @@ fn kill_verified(
 }
 
 fn kill_pid_raw(pid: u32) -> bool {
+    kill_pid_tree(pid)
+}
+
+/// Kill the process and its children. On Windows, prefer `taskkill /T /F` so
+/// orphaned python/litellm workers on port 4000 do not keep the health probe green.
+fn kill_pid_tree(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        if let Ok(status) = cmd.status() {
+            if status.success() || !pid_alive(pid) {
+                return true;
+            }
+        }
+    }
+
     let mut sys = System::new();
     let handle = sysinfo::Pid::from_u32(pid);
     sys.refresh_processes(ProcessesToUpdate::Some(&[handle]), true);
     if let Some(proc) = sys.process(handle) {
-        return proc.kill();
+        if proc.kill() {
+            return true;
+        }
     }
-    false
+    !pid_alive(pid)
 }
 
 /// Dual check: executable path (python/pythonw tolerant) + cmdline contains our runner under root.

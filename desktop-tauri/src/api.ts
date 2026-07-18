@@ -4,6 +4,7 @@ import type {
   GatewayStatus,
   ModelInput,
   ModelStore,
+  ParsedApiText,
   ProjectInfo,
 } from "./types";
 
@@ -18,6 +19,20 @@ export const api = {
   makeDefault: (id: string) => invoke<ModelStore>("make_default", { id }),
   fetchModels: (baseUrl: string, apiKey: string) =>
     invoke<string[]>("fetch_models", { baseUrl, apiKey }),
+  parseModelText: (text: string) => invoke<ParsedApiText>("parse_model_text", { text }),
+  parseModelFile: (path: string) => invoke<ParsedApiText>("parse_model_file", { path }),
+  importModelProfiles: (
+    baseUrl: string,
+    apiKey: string,
+    modelIds: string[],
+    nameHint?: string | null,
+  ) =>
+    invoke<ModelStore>("import_model_profiles", {
+      baseUrl,
+      apiKey,
+      modelIds,
+      nameHint: nameHint ?? null,
+    }),
   /** Fire-and-forget — progress via gateway:// events */
   start: () => invoke<void>("gateway_start"),
   stop: () => invoke<void>("gateway_stop"),

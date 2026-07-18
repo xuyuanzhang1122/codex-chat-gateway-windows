@@ -20,6 +20,15 @@ export interface ModelInput {
   model_id: string;
 }
 
+/** Parsed plaintext api.txt-style config from the backend. */
+export interface ParsedApiText {
+  base_url: string;
+  api_key: string;
+  models: string[];
+  name_hint: string | null;
+  model_missing: boolean;
+}
+
 export type GatewayPhase = "stopped" | "starting" | "running" | "stopping" | "error";
 
 export interface GatewayStatus {

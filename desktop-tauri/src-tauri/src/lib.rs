@@ -7,18 +7,22 @@ use gateway::{
     ActionResult, GatewayManager, GatewayStatus, ENDPOINT_V1, GITHUB_REPO,
 };
 use models::{
-    add_profile, delete_profile, fetch_remote_models, read_store, set_default, update_profile,
-    ModelInput, ModelStore,
+    add_profile, delete_profile, fetch_remote_models, import_profiles, parse_api_text, read_store,
+    set_default, update_profile, ModelInput, ModelStore, ParsedApiText,
 };
+use parking_lot::Mutex;
 use std::sync::Arc;
 use tauri::{
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
 
 struct AppState {
     gateway: Arc<GatewayManager>,
+    tray: Mutex<Option<TrayIcon>>,
+    /// Last known main-window visibility for tray menu labels.
+    window_visible: Mutex<bool>,
 }
 
 #[tauri::command]
@@ -86,6 +90,30 @@ fn make_default(state: State<'_, AppState>, id: String) -> Result<ModelStore, St
 #[tauri::command]
 fn fetch_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
     fetch_remote_models(&base_url, &api_key)
+}
+
+#[tauri::command]
+fn parse_model_text(text: String) -> Result<ParsedApiText, String> {
+    parse_api_text(&text)
+}
+
+#[tauri::command]
+fn parse_model_file(path: String) -> Result<ParsedApiText, String> {
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("读取文件失败: {e}"))?;
+    parse_api_text(&text)
+}
+
+#[tauri::command]
+fn import_model_profiles(
+    state: State<'_, AppState>,
+    base_url: String,
+    api_key: String,
+    model_ids: Vec<String>,
+    name_hint: Option<String>,
+) -> Result<ModelStore, String> {
+    let store = import_profiles(&base_url, &api_key, &model_ids, name_hint.as_deref())?;
+    state.gateway.invalidate_models(&store);
+    Ok(store)
 }
 
 /// Non-blocking: work runs on a native worker thread; UI listens to gateway://* events.
@@ -156,19 +184,23 @@ fn run_script(app: AppHandle, state: State<'_, AppState>, name: String) -> Resul
 }
 
 #[tauri::command]
-fn show_main_window(app: AppHandle) -> Result<(), String> {
+fn show_main_window(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        *state.window_visible.lock() = true;
+        sync_tray(&app, &state.gateway.snapshot());
     }
     Ok(())
 }
 
 #[tauri::command]
-fn hide_main_window(app: AppHandle) -> Result<(), String> {
+fn hide_main_window(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
+        *state.window_visible.lock() = false;
+        sync_tray(&app, &state.gateway.snapshot());
     }
     Ok(())
 }
@@ -180,6 +212,86 @@ fn quit_console(app: AppHandle) {
     app.exit(0);
 }
 
+/// Rebuild tray tooltip + menu so labels track gateway phase and window visibility.
+pub fn sync_tray(app: &AppHandle, status: &GatewayStatus) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let visible = *state.window_visible.lock();
+    let (phase_label, tip) = tray_status_labels(status);
+
+    let tray_guard = state.tray.lock();
+    let Some(tray) = tray_guard.as_ref() else {
+        return;
+    };
+
+    let _ = tray.set_tooltip(Some(&tip));
+
+    // Rebuild menu so Chinese labels stay in sync with live state.
+    if let Ok(menu) = build_tray_menu(app, &phase_label, visible) {
+        let _ = tray.set_menu(Some(menu));
+    }
+}
+
+fn tray_status_labels(status: &GatewayStatus) -> (String, String) {
+    let phase = match status.phase {
+        gateway::GatewayPhase::Running if status.healthy => {
+            if status.is_our_gateway {
+                "运行中"
+            } else {
+                "端口占用"
+            }
+        }
+        gateway::GatewayPhase::Running => "进程在线",
+        gateway::GatewayPhase::Starting => "启动中…",
+        gateway::GatewayPhase::Stopping => "停止中…",
+        gateway::GatewayPhase::Error => "异常",
+        gateway::GatewayPhase::Stopped => "已停止",
+    };
+    let pid = status
+        .pid
+        .map(|p| format!(" · PID {p}"))
+        .unwrap_or_default();
+    let model = status
+        .default_model_name
+        .as_ref()
+        .or(status.model.as_ref())
+        .map(|m| format!(" · {m}"))
+        .unwrap_or_default();
+    let tip = format!("Codex Chat Gateway · {phase}{pid}{model}");
+    let menu_status = format!("网关：{phase}");
+    (menu_status, tip)
+}
+
+fn build_tray_menu(
+    app: &AppHandle,
+    phase_label: &str,
+    window_visible: bool,
+) -> tauri::Result<Menu<tauri::Wry>> {
+    let status_i = MenuItem::with_id(app, "status", phase_label, false, None::<&str>)?;
+    let show_label = if window_visible {
+        "显示控制台（当前已打开）"
+    } else {
+        "显示控制台"
+    };
+    let hide_label = if window_visible {
+        "隐藏到托盘"
+    } else {
+        "隐藏到托盘（已隐藏）"
+    };
+    let show_i = MenuItem::with_id(app, "show", show_label, true, None::<&str>)?;
+    let hide_i = MenuItem::with_id(app, "hide", hide_label, window_visible, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit_i = MenuItem::with_id(
+        app,
+        "quit",
+        "退出控制台（网关继续运行）",
+        true,
+        None::<&str>,
+    )?;
+    Menu::with_items(app, &[&status_i, &sep, &show_i, &hide_i, &sep, &quit_i])
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let gateway = Arc::new(GatewayManager::new());
@@ -187,24 +299,30 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
         .manage(AppState {
             gateway: Arc::clone(&gateway),
+            tray: Mutex::new(None),
+            window_visible: Mutex::new(true),
         })
         .setup(move |app| {
+            // HTTPS GitHub Release updater (signature verified with public key in tauri.conf.json).
+            // Private signing key must never be committed — use TAURI_SIGNING_PRIVATE_KEY(_PATH).
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+
             let handle = app.handle().clone();
-            let _ = gateway.refresh_light();
+            let st0 = gateway.refresh_light();
             gateway.start_watcher(handle.clone());
 
             // System tray: close/minimize-to-tray must not kill the gateway process.
-            let show_i = MenuItem::with_id(app, "show", "显示控制台", true, None::<&str>)?;
-            let hide_i = MenuItem::with_id(app, "hide", "隐藏到托盘", true, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "退出控制台（网关继续运行）", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
+            let (phase_label, tip) = tray_status_labels(&st0);
+            let menu = build_tray_menu(app.handle(), &phase_label, true)?;
 
-            let _tray = TrayIconBuilder::new()
+            let tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().cloned().expect("missing window icon"))
                 .menu(&menu)
-                .tooltip("Codex Chat Gateway")
+                .tooltip(&tip)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
                         if let Some(w) = app.get_webview_window("main") {
@@ -212,10 +330,18 @@ pub fn run() {
                             let _ = w.unminimize();
                             let _ = w.set_focus();
                         }
+                        if let Some(state) = app.try_state::<AppState>() {
+                            *state.window_visible.lock() = true;
+                            sync_tray(app, &state.gateway.snapshot());
+                        }
                     }
                     "hide" => {
                         if let Some(w) = app.get_webview_window("main") {
                             let _ = w.hide();
+                        }
+                        if let Some(state) = app.try_state::<AppState>() {
+                            *state.window_visible.lock() = false;
+                            sync_tray(app, &state.gateway.snapshot());
                         }
                     }
                     "quit" => {
@@ -236,9 +362,17 @@ pub fn run() {
                             let _ = w.unminimize();
                             let _ = w.set_focus();
                         }
+                        if let Some(state) = app.try_state::<AppState>() {
+                            *state.window_visible.lock() = true;
+                            sync_tray(app, &state.gateway.snapshot());
+                        }
                     }
                 })
                 .build(app)?;
+
+            if let Some(state) = app.try_state::<AppState>() {
+                *state.tray.lock() = Some(tray);
+            }
 
             Ok(())
         })
@@ -247,6 +381,11 @@ pub fn run() {
                 // X button / Alt+F4 → hide to tray; do not stop gateway.
                 api.prevent_close();
                 let _ = window.hide();
+                let app = window.app_handle();
+                if let Some(state) = app.try_state::<AppState>() {
+                    *state.window_visible.lock() = false;
+                    sync_tray(app, &state.gateway.snapshot());
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -258,6 +397,9 @@ pub fn run() {
             remove_model,
             make_default,
             fetch_models,
+            parse_model_text,
+            parse_model_file,
+            import_model_profiles,
             gateway_start,
             gateway_stop,
             gateway_restart,
