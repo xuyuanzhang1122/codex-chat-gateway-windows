@@ -4,12 +4,28 @@
 
 | 产物 | 命令 | 说明 |
 |---|---|---|
-| **Studio 安装包**（推荐） | `.\scripts\build-tauri-installer.ps1` | Tauri 控制台 + LiteLLM runtime，Inno 深色安装器，可选卸载旧 C# 版 |
-| 旧便携包 / 旧安装包 | `build-portable.ps1` / `build-installer.ps1` | 仍面向 WPF 控制台 |
+| **Studio 安装包**（推荐） | `.\构建Studio安装器.bat` 或 `.\scripts\build-tauri-installer.ps1` | **Tauri + LobeHub** 控制台 + LiteLLM runtime，可选卸载旧 C# 版 |
+| 旧便携包 / 旧安装包 | `build-portable.ps1` / `build-installer.ps1` | **仅遗留 C#/WPF**，不要当 Studio 用 |
+
+### 如何确认是 Studio 而不是旧版
+
+| 检查 | Studio（正确） | 旧 WPF（错误） |
+|---|---|---|
+| 安装包文件名 | `CodexChatGateway-**Studio**-Setup-v1.3.0.exe` | `CodexChatGateway-Setup-v1.2.0.exe` |
+| 主程序体积 | 约 **10MB+** | 约 **100–200KB** |
+| 启动界面 | 深色 LobeHub / 侧栏 / 进入控制台 | 旧粒子 WPF 控制台 |
+| 目录标记 | 安装目录有 `STUDIO` 文件 | 无 |
+
+**不要**运行 / 安装：
+
+- `dist-installer\portable-bootstrap\...`（仅为中间产物；其中的 exe 可能是旧 WPF）
+- `dist-installer\portable\...`
+- 根目录旧的 `CodexChatGateway.exe`（若由 `build-desktop.ps1` 生成）
 
 安装器输出：
 
 ```text
+dist-installer/studio-payload-vX.Y.Z/     ← 解包内容（主程序=Tauri）
 dist-installer/CodexChatGateway-Studio-Setup-vX.Y.Z.exe
 dist-installer/CodexChatGateway-Studio-Setup-vX.Y.Z.exe.sha256
 ```
