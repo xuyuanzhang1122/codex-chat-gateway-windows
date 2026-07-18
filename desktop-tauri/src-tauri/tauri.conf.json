@@ -33,13 +33,23 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "publisher": "xuyuanzhang1122",
+    "copyright": "MIT",
+    "category": "DeveloperTool",
+    "shortDescription": "Local model bridge for Codex and Claude Desktop",
+    "longDescription": "Codex Chat Gateway Studio — LiteLLM local bridge with Tauri desktop console."
   }
 }

@@ -11,7 +11,11 @@ use models::{
     ModelInput, ModelStore,
 };
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, State, WindowEvent,
+};
 
 struct AppState {
     gateway: Arc<GatewayManager>,
@@ -151,6 +155,31 @@ fn run_script(app: AppHandle, state: State<'_, AppState>, name: String) -> Resul
     Ok(result)
 }
 
+#[tauri::command]
+fn show_main_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_main_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    Ok(())
+}
+
+/// Quit the desktop console only. Gateway process is left running unless the user
+/// explicitly stops it first (or uses uninstall scripts).
+#[tauri::command]
+fn quit_console(app: AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let gateway = Arc::new(GatewayManager::new());
@@ -163,10 +192,62 @@ pub fn run() {
         })
         .setup(move |app| {
             let handle = app.handle().clone();
-            // Initial light probe + start watcher
             let _ = gateway.refresh_light();
-            gateway.start_watcher(handle);
+            gateway.start_watcher(handle.clone());
+
+            // System tray: close/minimize-to-tray must not kill the gateway process.
+            let show_i = MenuItem::with_id(app, "show", "显示控制台", true, None::<&str>)?;
+            let hide_i = MenuItem::with_id(app, "hide", "隐藏到托盘", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "退出控制台（网关继续运行）", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
+
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().cloned().expect("missing window icon"))
+                .menu(&menu)
+                .tooltip("Codex Chat Gateway")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    "hide" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.hide();
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                // X button / Alt+F4 → hide to tray; do not stop gateway.
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -184,6 +265,9 @@ pub fn run() {
             get_logs_dir,
             toggle_autostart,
             run_script,
+            show_main_window,
+            hide_main_window,
+            quit_console,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
