@@ -56,6 +56,26 @@ import type {
 
 type Page = "gateway" | "models" | "clients" | "activity";
 
+type ActionKey =
+  | "start"
+  | "stop"
+  | "restart"
+  | "check"
+  | "codex-cfg"
+  | "codex-restore"
+  | "claude-cfg"
+  | "claude-restore"
+  | "autostart"
+  | "logs"
+  | "default"
+  | "delete";
+
+type Feedback = {
+  key: ActionKey;
+  state: "loading" | "ok" | "err";
+  message: string;
+};
+
 const emptyStatus: GatewayStatus = {
   phase: "stopped",
   running: false,
@@ -112,6 +132,9 @@ function App() {
   const [dialog, setDialog] = useState<null | { mode: "add" | "edit"; profile?: ModelProfile }>(
     null,
   );
+  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const pendingKey = useRef<ActionKey | null>(null);
+  const feedbackTimer = useRef<number | null>(null);
   const ready = !splash;
 
   const pushLog = useCallback((level: LogLevel, msg: string) => {
@@ -121,6 +144,36 @@ function App() {
       return next.length > 250 ? next.slice(-250) : next;
     });
   }, []);
+
+  const showFeedback = useCallback((fb: Feedback, autoClearMs = 4500) => {
+    setFeedback(fb);
+    if (feedbackTimer.current) window.clearTimeout(feedbackTimer.current);
+    if (fb.state !== "loading" && autoClearMs > 0) {
+      feedbackTimer.current = window.setTimeout(() => {
+        setFeedback((cur) => (cur && cur.key === fb.key && cur.state !== "loading" ? null : cur));
+      }, autoClearMs);
+    }
+  }, []);
+
+  const beginAction = useCallback(
+    (key: ActionKey, loadingMsg: string) => {
+      pendingKey.current = key;
+      showFeedback({ key, state: "loading", message: loadingMsg }, 0);
+    },
+    [showFeedback],
+  );
+
+  // Auto-select default / sole profile so actions work without an extra click
+  useEffect(() => {
+    if (store.profiles.length === 0) {
+      setSelectedId(null);
+      return;
+    }
+    setSelectedId((cur) => {
+      if (cur && store.profiles.some((p) => p.id === cur)) return cur;
+      return store.default_id || store.profiles[0].id;
+    });
+  }, [store]);
 
   // Event-driven backend (no heavy polling loop)
   useEffect(() => {
@@ -154,7 +207,17 @@ function App() {
         );
       });
       const u3 = await listen<{ ok: boolean; message: string }>("gateway://action", (e) => {
-        // status already streamed; keep models warm after start
+        const key = pendingKey.current;
+        if (key) {
+          showFeedback({
+            key,
+            state: e.payload.ok ? "ok" : "err",
+            message: e.payload.ok
+              ? e.payload.message || "完成"
+              : e.payload.message || "失败",
+          });
+          pendingKey.current = null;
+        }
         if (e.payload.ok) {
           void api.listModels().then(setStore).catch(() => undefined);
           void api.projectInfo().then(setInfo).catch(() => undefined);
@@ -165,8 +228,9 @@ function App() {
 
     return () => {
       for (const u of unsubs) u();
+      if (feedbackTimer.current) window.clearTimeout(feedbackTimer.current);
     };
-  }, [ready, pushLog]);
+  }, [ready, pushLog, showFeedback]);
 
   const enter = () => {
     setSplashExit(true);
@@ -174,16 +238,18 @@ function App() {
   };
 
   const hasDefault = store.profiles.some((p) => p.id === store.default_id);
-  const busy = status.busy;
+  const busy = status.busy || feedback?.state === "loading";
   const live = status.running || status.healthy;
 
   const onStart = () => {
     if (!hasDefault) {
       pushLog("DIM", "请先添加默认模型");
+      showFeedback({ key: "start", state: "err", message: "请先添加默认模型" });
       setPage("models");
       setDialog({ mode: "add" });
       return;
     }
+    beginAction("start", "正在启动网关…");
     void api.start();
   };
 
@@ -271,32 +337,70 @@ function App() {
           />
 
           <main className="workspace-main">
-            <Flexbox gap={16} style={{ minHeight: "100%" }}>
+            <div className="main-col">
               <PageHeader page={page} version={info?.version} status={status} />
 
-              <div className="page-pane" style={{ flex: 1 }}>
+              <div className="page-pane">
                 {page === "gateway" && (
                   <GatewayView
                     status={status}
                     store={store}
                     busy={busy}
                     live={live}
+                    feedback={feedback}
+                    recentLogs={logs.slice(-12)}
                     onStart={onStart}
-                    onStop={() => void api.stop()}
+                    onStop={() => {
+                      beginAction("stop", "正在停止网关…");
+                      void api.stop();
+                    }}
                     onRestart={() => {
                       if (!hasDefault) {
                         setPage("models");
+                        showFeedback({
+                          key: "restart",
+                          state: "err",
+                          message: "请先配置默认模型",
+                        });
                         return;
                       }
+                      beginAction("restart", "正在重启网关…");
                       void api.restart();
                     }}
-                    onCheck={() => void api.check()}
+                    onCheck={() => {
+                      void (async () => {
+                        beginAction("check", "正在健康检查…");
+                        try {
+                          const r = await api.check();
+                          showFeedback({
+                            key: "check",
+                            state: r.ok ? "ok" : "err",
+                            message: r.ok
+                              ? "健康检查通过"
+                              : r.message || "健康检查失败",
+                          });
+                          pendingKey.current = null;
+                        } catch (e) {
+                          showFeedback({
+                            key: "check",
+                            state: "err",
+                            message: String(e),
+                          });
+                          pendingKey.current = null;
+                        }
+                      })();
+                    }}
                     onLogs={async () => {
+                      beginAction("logs", "打开日志目录…");
                       try {
                         const dir = await api.logsDir();
                         await openPath(dir);
+                        showFeedback({ key: "logs", state: "ok", message: "已打开日志目录" });
+                        pendingKey.current = null;
                         pushLog("OK", `日志目录 ${dir}`);
                       } catch (e) {
+                        showFeedback({ key: "logs", state: "err", message: String(e) });
+                        pendingKey.current = null;
                         pushLog("ERR", String(e));
                       }
                     }}
@@ -315,10 +419,13 @@ function App() {
                     store={store}
                     selectedId={selectedId}
                     busy={busy}
+                    feedback={feedback}
                     onSelect={setSelectedId}
                     onAdd={() => setDialog({ mode: "add" })}
                     onEdit={() => {
-                      const p = store.profiles.find((x) => x.id === selectedId);
+                      const id =
+                        selectedId || store.default_id || store.profiles[0]?.id || null;
+                      const p = store.profiles.find((x) => x.id === id);
                       if (!p) {
                         pushLog("DIM", "请先选择模型");
                         return;
@@ -326,10 +433,27 @@ function App() {
                       setDialog({ mode: "edit", profile: p });
                     }}
                     onDefault={async () => {
-                      if (!selectedId) return;
+                      const id =
+                        selectedId || store.default_id || store.profiles[0]?.id || null;
+                      if (!id) return;
+                      if (id === store.default_id) {
+                        showFeedback({
+                          key: "default",
+                          state: "ok",
+                          message:
+                            store.profiles.length === 1
+                              ? "当前唯一配置已是默认"
+                              : "已是默认模型",
+                        });
+                        return;
+                      }
+                      beginAction("default", "正在设为默认…");
                       try {
-                        const next = await api.makeDefault(selectedId);
+                        const next = await api.makeDefault(id);
                         setStore(next);
+                        setSelectedId(id);
+                        showFeedback({ key: "default", state: "ok", message: "已设为默认模型" });
+                        pendingKey.current = null;
                         pushLog("OK", "已设为默认");
                         if (live) {
                           const yes = await ask("是否立即重启网关？", {
@@ -338,15 +462,22 @@ function App() {
                             okLabel: "重启",
                             cancelLabel: "稍后",
                           });
-                          if (yes) void api.restart();
+                          if (yes) {
+                            beginAction("restart", "正在重启网关…");
+                            void api.restart();
+                          }
                         }
                       } catch (e) {
+                        showFeedback({ key: "default", state: "err", message: String(e) });
+                        pendingKey.current = null;
                         pushLog("ERR", String(e));
                       }
                     }}
                     onDelete={async () => {
-                      if (!selectedId) return;
-                      const p = store.profiles.find((x) => x.id === selectedId);
+                      const id =
+                        selectedId || store.default_id || store.profiles[0]?.id || null;
+                      if (!id) return;
+                      const p = store.profiles.find((x) => x.id === id);
                       if (!p) return;
                       const wasDefault = p.id === store.default_id;
                       const ok = await ask(`删除「${p.name}」？`, {
@@ -356,9 +487,11 @@ function App() {
                         cancelLabel: "取消",
                       });
                       if (!ok) return;
+                      beginAction("delete", "正在删除…");
                       try {
-                        setStore(await api.removeModel(selectedId));
-                        setSelectedId(null);
+                        setStore(await api.removeModel(id));
+                        showFeedback({ key: "delete", state: "ok", message: `已删除 ${p.name}` });
+                        pendingKey.current = null;
                         pushLog("OK", `已删除 ${p.name}`);
                         if (live && wasDefault) {
                           const yes = await ask(
@@ -370,10 +503,14 @@ function App() {
                               cancelLabel: "稍后",
                             },
                           );
-                          if (yes) void api.restart();
-                          else pushLog("DIM", "稍后请手动重启网关");
+                          if (yes) {
+                            beginAction("restart", "正在重启网关…");
+                            void api.restart();
+                          } else pushLog("DIM", "稍后请手动重启网关");
                         }
                       } catch (e) {
+                        showFeedback({ key: "delete", state: "err", message: String(e) });
+                        pendingKey.current = null;
                         pushLog("ERR", String(e));
                       }
                     }}
@@ -393,7 +530,8 @@ function App() {
                   <ClientsView
                     busy={busy}
                     autostart={!!info?.autostart}
-                    onScript={(label, script, confirmText) => {
+                    feedback={feedback}
+                    onScript={(key, label, script, confirmText) => {
                       void (async () => {
                         if (confirmText) {
                           const ok = await ask(confirmText, {
@@ -407,11 +545,20 @@ function App() {
                             return;
                           }
                         }
+                        beginAction(key, `${label}…`);
                         pushLog("INFO", `▶ ${label}`);
                         try {
-                          await api.runScript(script);
+                          const r = await api.runScript(script);
                           setInfo(await api.projectInfo());
+                          showFeedback({
+                            key,
+                            state: r.ok ? "ok" : "err",
+                            message: r.ok ? `${label}完成` : r.message || `${label}失败`,
+                          });
+                          pendingKey.current = null;
                         } catch (e) {
+                          showFeedback({ key, state: "err", message: String(e) });
+                          pendingKey.current = null;
                           pushLog("ERR", String(e));
                         }
                       })();
@@ -419,11 +566,16 @@ function App() {
                     onAutostart={() => {
                       const enable = !info?.autostart;
                       void (async () => {
+                        beginAction("autostart", enable ? "正在启用自启…" : "正在关闭自启…");
                         try {
                           const msg = await api.toggleAutostart(enable);
+                          showFeedback({ key: "autostart", state: "ok", message: msg || "已更新" });
+                          pendingKey.current = null;
                           pushLog("OK", msg);
                           setInfo(await api.projectInfo());
                         } catch (e) {
+                          showFeedback({ key: "autostart", state: "err", message: String(e) });
+                          pendingKey.current = null;
                           pushLog("ERR", String(e));
                         }
                       })();
@@ -446,7 +598,7 @@ function App() {
               </div>
 
               <CreditBar info={info} />
-            </Flexbox>
+            </div>
           </main>
         </div>
       </div>
@@ -516,11 +668,36 @@ const PageHeader = memo(function PageHeader({
   );
 });
 
+function FeedbackAlert({ feedback }: { feedback: Feedback | null }) {
+  if (!feedback) return null;
+  const type =
+    feedback.state === "loading" ? "info" : feedback.state === "ok" ? "success" : "error";
+  return (
+    <Alert
+      type={type}
+      showIcon
+      message={
+        feedback.state === "loading"
+          ? feedback.message
+          : feedback.state === "ok"
+            ? `✓ ${feedback.message}`
+            : `✗ ${feedback.message}`
+      }
+    />
+  );
+}
+
+function isLoading(feedback: Feedback | null, key: ActionKey) {
+  return feedback?.state === "loading" && feedback.key === key;
+}
+
 function GatewayView({
   status,
   store,
   busy,
   live,
+  feedback,
+  recentLogs,
   onStart,
   onStop,
   onRestart,
@@ -532,6 +709,8 @@ function GatewayView({
   store: ModelStore;
   busy: boolean;
   live: boolean;
+  feedback: Feedback | null;
+  recentLogs: LogLine[];
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
@@ -543,9 +722,13 @@ function GatewayView({
     status.default_model_name ||
     store.profiles.find((p) => p.id === store.default_id)?.name ||
     "未配置";
+  const logRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+  }, [recentLogs]);
 
   return (
-    <Flexbox gap={14}>
+    <Flexbox gap={12} style={{ height: "100%", minHeight: 0 }}>
       {!status.is_our_gateway && status.healthy && (
         <Alert
           type="warning"
@@ -554,7 +737,7 @@ function GatewayView({
         />
       )}
 
-      <Flexbox horizontal gap={12} style={{ flexWrap: "wrap" }}>
+      <Flexbox horizontal gap={12} style={{ flexWrap: "wrap", flexShrink: 0 }}>
         <Block variant="outlined" padding={16} style={{ flex: "1 1 200px", minWidth: 180 }}>
           <Text type="secondary" fontSize={12}>
             状态
@@ -590,8 +773,8 @@ function GatewayView({
         </Block>
       </Flexbox>
 
-      <Block variant="outlined" padding={16}>
-        <Flexbox gap={14}>
+      <Block variant="outlined" padding={16} style={{ flexShrink: 0 }}>
+        <Flexbox gap={12}>
           <Flexbox horizontal gap={10} align="center" style={{ flexWrap: "wrap" }}>
             <Text type="secondary" fontSize={12}>
               Endpoint
@@ -602,7 +785,7 @@ function GatewayView({
             <Button
               type="primary"
               icon={Play}
-              loading={status.phase === "starting"}
+              loading={isLoading(feedback, "start") || status.phase === "starting"}
               disabled={busy || (live && status.is_our_gateway)}
               onClick={onStart}
             >
@@ -610,26 +793,83 @@ function GatewayView({
             </Button>
             <Button
               icon={Square}
-              loading={status.phase === "stopping"}
+              loading={isLoading(feedback, "stop") || status.phase === "stopping"}
               disabled={busy || !live}
               onClick={onStop}
             >
               停止
             </Button>
-            <Button icon={RotateCcw} disabled={busy || !live} onClick={onRestart}>
+            <Button
+              icon={RotateCcw}
+              loading={isLoading(feedback, "restart")}
+              disabled={busy || !live}
+              onClick={onRestart}
+            >
               重启
             </Button>
-            <Button icon={CheckCircle2} disabled={busy} onClick={onCheck}>
+            <Button
+              icon={CheckCircle2}
+              loading={isLoading(feedback, "check")}
+              disabled={busy}
+              onClick={onCheck}
+            >
               健康检查
             </Button>
-            <Button icon={FolderOpen} variant="outlined" onClick={onLogs}>
+            <Button
+              icon={FolderOpen}
+              variant="outlined"
+              loading={isLoading(feedback, "logs")}
+              disabled={busy}
+              onClick={onLogs}
+            >
               日志目录
             </Button>
             <Button icon={Bot} variant="outlined" onClick={onUi}>
               LiteLLM UI
             </Button>
           </Flexbox>
+          <FeedbackAlert
+            feedback={
+              feedback &&
+              ["start", "stop", "restart", "check", "logs"].includes(feedback.key)
+                ? feedback
+                : null
+            }
+          />
         </Flexbox>
+      </Block>
+
+      <Block
+        variant="outlined"
+        padding={0}
+        style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+      >
+        <Flexbox
+          horizontal
+          distribution="space-between"
+          align="center"
+          padding={12}
+          style={{ borderBottom: "1px solid rgba(255,255,255,0.06)", flexShrink: 0 }}
+        >
+          <Text weight={600} fontSize={13}>
+            最近操作
+          </Text>
+          <Text type="secondary" fontSize={11}>
+            完整日志见左侧「日志」页
+          </Text>
+        </Flexbox>
+        <div className="mini-log" ref={logRef}>
+          {recentLogs.length === 0 ? (
+            <Text type="secondary">启动 / 停止 / 检查后的结果会出现在这里</Text>
+          ) : (
+            recentLogs.map((l) => (
+              <div className="log-line" key={l.id}>
+                <span style={{ opacity: 0.7, fontWeight: 700 }}>{l.level}</span>
+                <span>{l.message}</span>
+              </div>
+            ))
+          )}
+        </div>
       </Block>
     </Flexbox>
   );
@@ -639,6 +879,7 @@ function ModelsView({
   store,
   selectedId,
   busy,
+  feedback,
   onSelect,
   onAdd,
   onEdit,
@@ -649,6 +890,7 @@ function ModelsView({
   store: ModelStore;
   selectedId: string | null;
   busy: boolean;
+  feedback: Feedback | null;
   onSelect: (id: string) => void;
   onAdd: () => void;
   onEdit: () => void;
@@ -656,8 +898,12 @@ function ModelsView({
   onDelete: () => void;
   onRefresh: () => void;
 }) {
+  const activeId = selectedId || store.default_id || store.profiles[0]?.id || null;
+  const activeIsDefault = !!activeId && activeId === store.default_id;
+  const onlyOne = store.profiles.length === 1;
+
   return (
-    <Flexbox gap={14}>
+    <Flexbox gap={14} style={{ height: "100%" }}>
       <Flexbox horizontal distribution="space-between" align="center">
         <Text type="secondary">{store.profiles.length} 个配置</Text>
         <Flexbox horizontal gap={8}>
@@ -685,7 +931,7 @@ function ModelsView({
           <Flexbox gap={10} horizontal style={{ flexWrap: "wrap" }}>
             {store.profiles.map((p) => {
               const isDefault = p.id === store.default_id;
-              const selected = selectedId === p.id;
+              const selected = activeId === p.id;
               return (
                 <Block
                   key={p.id}
@@ -717,17 +963,47 @@ function ModelsView({
               );
             })}
           </Flexbox>
-          <Flexbox horizontal gap={8}>
-            <Button icon={Star} disabled={busy} onClick={onDefault}>
-              设为默认
-            </Button>
-            <Button icon={Pencil} disabled={busy} onClick={onEdit}>
+          <Flexbox horizontal gap={8} align="center" style={{ flexWrap: "wrap" }}>
+            <Tooltip
+              title={
+                activeIsDefault
+                  ? onlyOne
+                    ? "当前唯一配置已是默认"
+                    : "已是默认模型"
+                  : "将选中项设为默认"
+              }
+            >
+              <Button
+                icon={Star}
+                loading={isLoading(feedback, "default")}
+                disabled={busy || !activeId}
+                onClick={onDefault}
+              >
+                {activeIsDefault ? "已是默认" : "设为默认"}
+              </Button>
+            </Tooltip>
+            <Button
+              icon={Pencil}
+              disabled={busy || !activeId}
+              onClick={onEdit}
+            >
               编辑
             </Button>
-            <Button danger icon={Trash2} disabled={busy} onClick={onDelete}>
+            <Button
+              danger
+              icon={Trash2}
+              loading={isLoading(feedback, "delete")}
+              disabled={busy || !activeId}
+              onClick={onDelete}
+            >
               删除
             </Button>
           </Flexbox>
+          <FeedbackAlert
+            feedback={
+              feedback && ["default", "delete"].includes(feedback.key) ? feedback : null
+            }
+          />
         </>
       )}
     </Flexbox>
@@ -737,83 +1013,104 @@ function ModelsView({
 function ClientsView({
   busy,
   autostart,
+  feedback,
   onScript,
   onAutostart,
 }: {
   busy: boolean;
   autostart: boolean;
-  onScript: (label: string, script: string, confirm?: string) => void;
+  feedback: Feedback | null;
+  onScript: (
+    key: ActionKey,
+    label: string,
+    script: string,
+    confirm?: string,
+  ) => void;
   onAutostart: () => void;
 }) {
   return (
-    <Flexbox gap={12} horizontal style={{ flexWrap: "wrap" }}>
-      <Block variant="outlined" padding={18} style={{ flex: "1 1 320px" }}>
-        <Flexbox gap={10}>
-          <Text weight={700} fontSize={16}>
-            Codex
-          </Text>
-          <Text type="secondary" fontSize={13}>
-            写入 Responses 提供方，自动备份并保留 MCP / 插件。
-          </Text>
-          <Flexbox horizontal gap={8}>
-            <Button
-              type="primary"
-              disabled={busy}
-              onClick={() => onScript("配置 Codex", "configure-codex.ps1")}
-            >
-              配置
-            </Button>
-            <Button
-              danger
-              disabled={busy}
-              onClick={() =>
-                onScript(
-                  "恢复 Codex",
-                  "restore-codex.ps1",
-                  "撤销网关相关 Codex 配置并尽量恢复官方设置？",
-                )
-              }
-            >
-              恢复官方
-            </Button>
+    <Flexbox gap={12} style={{ height: "100%" }}>
+      <Flexbox horizontal gap={12} style={{ flexWrap: "wrap" }}>
+        <Block variant="outlined" padding={18} style={{ flex: "1 1 320px" }}>
+          <Flexbox gap={10}>
+            <Text weight={700} fontSize={16}>
+              Codex
+            </Text>
+            <Text type="secondary" fontSize={13}>
+              写入 Responses 提供方，自动备份并保留 MCP / 插件。
+            </Text>
+            <Flexbox horizontal gap={8}>
+              <Button
+                type="primary"
+                loading={isLoading(feedback, "codex-cfg")}
+                disabled={busy}
+                onClick={() => onScript("codex-cfg", "配置 Codex", "configure-codex.ps1")}
+              >
+                配置
+              </Button>
+              <Button
+                danger
+                loading={isLoading(feedback, "codex-restore")}
+                disabled={busy}
+                onClick={() =>
+                  onScript(
+                    "codex-restore",
+                    "恢复 Codex",
+                    "restore-codex.ps1",
+                    "撤销网关相关 Codex 配置并尽量恢复官方设置？",
+                  )
+                }
+              >
+                恢复官方
+              </Button>
+            </Flexbox>
           </Flexbox>
-        </Flexbox>
-      </Block>
+        </Block>
 
-      <Block variant="outlined" padding={18} style={{ flex: "1 1 320px" }}>
-        <Flexbox gap={10}>
-          <Text weight={700} fontSize={16}>
-            Claude Desktop
-          </Text>
-          <Text type="secondary" fontSize={13}>
-            仅配置 Code 模式 3P Profile，不改普通聊天或 MCP。
-          </Text>
-          <Flexbox horizontal gap={8}>
-            <Button
-              type="primary"
-              disabled={busy}
-              onClick={() => onScript("配置 Claude Desktop", "configure-claude-desktop.ps1")}
-            >
-              配置
-            </Button>
-            <Button
-              danger
-              disabled={busy}
-              onClick={() =>
-                onScript(
-                  "恢复 Claude",
-                  "restore-claude-desktop.ps1",
-                  "移除本项目 Profile 并切回官方 1P 模式？",
-                )
-              }
-            >
-              恢复官方
-            </Button>
+        <Block variant="outlined" padding={18} style={{ flex: "1 1 320px" }}>
+          <Flexbox gap={10}>
+            <Text weight={700} fontSize={16}>
+              Claude Desktop
+            </Text>
+            <Text type="secondary" fontSize={13}>
+              仅配置 Code 模式 3P Profile，不改普通聊天或 MCP。
+            </Text>
+            <Flexbox horizontal gap={8}>
+              <Button
+                type="primary"
+                loading={isLoading(feedback, "claude-cfg")}
+                disabled={busy}
+                onClick={() =>
+                  onScript(
+                    "claude-cfg",
+                    "配置 Claude Desktop",
+                    "configure-claude-desktop.ps1",
+                  )
+                }
+              >
+                配置
+              </Button>
+              <Button
+                danger
+                loading={isLoading(feedback, "claude-restore")}
+                disabled={busy}
+                onClick={() =>
+                  onScript(
+                    "claude-restore",
+                    "恢复 Claude",
+                    "restore-claude-desktop.ps1",
+                    "移除本项目 Profile 并切回官方 1P 模式？",
+                  )
+                }
+              >
+                恢复官方
+              </Button>
+            </Flexbox>
           </Flexbox>
-        </Flexbox>
-      </Block>
+        </Block>
+      </Flexbox>
 
-      <Block variant="outlined" padding={18} style={{ flex: "1 1 100%" }}>
+      <Block variant="outlined" padding={18}>
         <Flexbox horizontal distribution="space-between" align="center" gap={12}>
           <Flexbox gap={4}>
             <Text weight={700} fontSize={16}>
@@ -823,11 +1120,27 @@ function ClientsView({
               登录 Windows 后自动启动网关进程（不启动本控制台）
             </Text>
           </Flexbox>
-          <Button icon={Settings2} disabled={busy} onClick={onAutostart}>
+          <Button
+            icon={Settings2}
+            loading={isLoading(feedback, "autostart")}
+            disabled={busy}
+            onClick={onAutostart}
+          >
             {autostart ? "已开启 · 点击关闭" : "已关闭 · 点击开启"}
           </Button>
         </Flexbox>
       </Block>
+
+      <FeedbackAlert
+        feedback={
+          feedback &&
+          ["codex-cfg", "codex-restore", "claude-cfg", "claude-restore", "autostart"].includes(
+            feedback.key,
+          )
+            ? feedback
+            : null
+        }
+      />
     </Flexbox>
   );
 }
@@ -847,14 +1160,18 @@ function ActivityView({
   }, [logs]);
 
   return (
-    <Block variant="outlined" padding={0}>
-      <Flexbox>
+    <Block
+      variant="outlined"
+      padding={0}
+      style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}
+    >
+      <Flexbox style={{ height: "100%", minHeight: 0 }}>
         <Flexbox
           horizontal
           distribution="space-between"
           align="center"
           padding={12}
-          style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}
+          style={{ borderBottom: "1px solid rgba(255,255,255,0.06)", flexShrink: 0 }}
         >
           <Text weight={600}>事件流</Text>
           <Flexbox horizontal gap={8}>
@@ -866,7 +1183,7 @@ function ActivityView({
             </Button>
           </Flexbox>
         </Flexbox>
-        <div className="log-scroll" ref={ref}>
+        <div className="mini-log" ref={ref} style={{ flex: 1 }}>
           {logs.length === 0 ? (
             <Text type="secondary">暂无输出 · 启动/停止网关时会推送事件</Text>
           ) : (

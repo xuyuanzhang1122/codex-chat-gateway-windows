@@ -81,8 +81,18 @@ body,
 .workspace-main {
   min-width: 0;
   min-height: 0;
-  overflow: auto;
-  padding: 20px 24px 16px;
+  overflow: hidden;
+  padding: 16px 20px 10px;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-main > .main-col {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .credit-bar {
@@ -90,11 +100,12 @@ body,
   flex-wrap: wrap;
   gap: 8px 14px;
   align-items: center;
-  padding-top: 12px;
-  margin-top: 8px;
+  padding-top: 8px;
+  margin-top: 0;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
-  font-size: 12px;
-  opacity: 0.75;
+  font-size: 11.5px;
+  opacity: 0.7;
+  flex-shrink: 0;
 }
 
 .credit-bar a {
@@ -141,8 +152,37 @@ body,
   padding: 1px 0;
 }
 
-/* Reduce paint cost while switching pages */
+/* Fill remaining stage height; no empty black void */
 .page-pane {
-  content-visibility: auto;
-  contain-intrinsic-size: 1px 600px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.page-pane > * {
+  flex: 1;
+  min-height: 0;
+}
+
+.feedback-ok {
+  color: #3de0c5;
+}
+.feedback-err {
+  color: #ff6b7a;
+}
+
+.mini-log {
+  flex: 1;
+  min-height: 140px;
+  max-height: none;
+  overflow: auto;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.28);
+  padding: 10px 12px;
+  font-family: ui-monospace, Cascadia Code, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  user-select: text;
 }
