@@ -11,28 +11,25 @@ permissions:
   contents: write
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Primary: Tauri Studio installer (+ optional signed updater artifacts)
-  # ---------------------------------------------------------------------------
   studio-windows-x64:
     runs-on: windows-2022
     timeout-minutes: 90
-
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Validate tag and VERSION
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
           $version = (Get-Content VERSION -Raw).Trim()
-          if ("v$version" -ne "${{ github.ref_name }}") {
-            throw "Tag ${{ github.ref_name }} does not match VERSION v$version"
+          $tag = $env:GITHUB_REF_NAME
+          if ("v$version" -ne $tag) {
+            throw "Tag $tag does not match VERSION v$version"
           }
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -61,44 +58,40 @@ jobs:
       - name: Install Inno Setup 6
         shell: pwsh
         run: |
-          $url = "https://jrsoftware.org/download.php/is.exe"
           $installer = Join-Path $env:TEMP "innosetup-install.exe"
-          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+          Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile $installer -UseBasicParsing
           Start-Process -FilePath $installer -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" -Wait
-          $iscc = @(
-            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
-            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $pf86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+          $candidates = @(
+            (Join-Path $pf86 "Inno Setup 6\ISCC.exe"),
+            (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe"),
+            (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
+          )
+          $iscc = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
           if (-not $iscc) { throw "ISCC.exe not found after Inno install" }
           Write-Host "ISCC=$iscc"
-          echo "ISCC=$iscc" >> $env:GITHUB_ENV
-
-      - name: Install WebView2 runtime (if missing)
-        shell: pwsh
-        run: |
-          # GitHub windows runners usually have WebView2; keep step for safety.
-          Write-Host "WebView2 check skipped (bundled bootstrapper in tauri.conf)"
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build Studio installer
         shell: pwsh
         run: |
+          if (-not $env:ISCC) { throw "ISCC env not set" }
           ./scripts/build-tauri-installer.ps1 -InnoCompiler $env:ISCC
 
-      - name: Build signed updater artifacts (optional)
-        # Requires repo secret TAURI_SIGNING_PRIVATE_KEY (minisign private key contents).
-        # Optional: TAURI_SIGNING_PRIVATE_KEY_PASSWORD if the key is encrypted.
-        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+      - name: Build signed updater artifacts
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          # Studio installer uses --no-bundle; updater needs a signed NSIS zip from full tauri build.
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            Write-Host "TAURI_SIGNING_PRIVATE_KEY not set; skip updater artifacts"
+            exit 0
+          }
           ./scripts/build-updater-artifacts.ps1
 
       - name: Upload Studio artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: codex-chat-gateway-studio-windows-x64
           path: |
@@ -114,7 +107,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = $env:GITHUB_REF_NAME
           $files = @(
             Get-ChildItem dist-installer -File -ErrorAction SilentlyContinue |
               Where-Object {
@@ -133,32 +126,20 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @files --clobber
           } else {
-            $notes = @"
-          ## Codex Chat Gateway Studio $tag
-
-          - **Studio console**: Tauri 2 + LobeHub UI
-          - Gateway on ``127.0.0.1`` only
-          - Optional auto-update via ``latest.json`` (signed)
-
-          See [README](https://github.com/xuyuanzhang1122/codex-chat-gateway-windows#readme) / [中文说明](https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/blob/main/README.zh-CN.md).
-          "@
+            $notes = "Codex Chat Gateway Studio $tag`n`n- Studio console (Tauri 2 + LobeHub)`n- Gateway binds to 127.0.0.1 only`n- Auto-update via latest.json when present`n`nREADME: https://github.com/xuyuanzhang1122/codex-chat-gateway-windows#readme"
             gh release create $tag @files --title $tag --notes $notes
           }
 
-  # ---------------------------------------------------------------------------
-  # Legacy: portable + old WPF installer (kept for compatibility; non-blocking)
-  # ---------------------------------------------------------------------------
   legacy-portable-windows-x64:
     runs-on: windows-2022
     timeout-minutes: 45
     continue-on-error: true
-
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Set up build Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -170,23 +151,23 @@ jobs:
       - name: Install Inno Setup 6
         shell: pwsh
         run: |
-          $url = "https://jrsoftware.org/download.php/is.exe"
           $installer = Join-Path $env:TEMP "innosetup-install.exe"
-          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+          Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile $installer -UseBasicParsing
           Start-Process -FilePath $installer -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" -Wait
 
       - name: Build legacy branded EXE installer
         shell: pwsh
         run: |
           $version = (Get-Content VERSION -Raw).Trim()
+          $pf86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
           $iscc = @(
-            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+            (Join-Path $pf86 "Inno Setup 6\ISCC.exe"),
+            (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
           ./scripts/build-installer.ps1 -PayloadDirectory "dist/codex-chat-gateway-portable-v$version" -InnoCompiler $iscc
 
       - name: Upload legacy artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: codex-chat-gateway-legacy-windows-x64
           path: |
@@ -202,10 +183,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = $env:GITHUB_REF_NAME
           $files = @(
             Get-ChildItem dist -File -ErrorAction SilentlyContinue |
-              Where-Object { $_.Extension -in @('.7z') -or $_.Name -like '*.sha256' } |
+              Where-Object { $_.Extension -eq '.7z' -or $_.Name -like '*.sha256' } |
               ForEach-Object FullName
           )
           $files += @(
@@ -217,7 +198,6 @@ jobs:
             Write-Host "No legacy files to upload"
             exit 0
           }
-          # Wait briefly for Studio job to create the release if racing
           for ($i = 0; $i -lt 30; $i++) {
             gh release view $tag *> $null
             if ($LASTEXITCODE -eq 0) { break }
