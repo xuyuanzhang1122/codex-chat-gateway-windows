@@ -21,6 +21,7 @@ import {
 } from "@lobehub/ui";
 import {
   Activity,
+  AlertTriangle,
   Bot,
   CheckCircle2,
   Copy,
@@ -41,7 +42,6 @@ import {
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
-import { ask, message as dialogMessage } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { TitleBar } from "./TitleBar";
 import type {
@@ -74,6 +74,21 @@ type Feedback = {
   key: ActionKey;
   state: "loading" | "ok" | "err";
   message: string;
+};
+
+type ConfirmRequest = {
+  title: string;
+  content: string;
+  okText?: string;
+  cancelText?: string;
+  danger?: boolean;
+  resolve: (ok: boolean) => void;
+};
+
+type NoticeRequest = {
+  title: string;
+  content: string;
+  type?: "error" | "info" | "success";
 };
 
 const emptyStatus: GatewayStatus = {
@@ -133,9 +148,19 @@ function App() {
     null,
   );
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
+  const [notice, setNotice] = useState<NoticeRequest | null>(null);
   const pendingKey = useRef<ActionKey | null>(null);
   const feedbackTimer = useRef<number | null>(null);
   const ready = !splash;
+
+  const confirm = useCallback(
+    (opts: Omit<ConfirmRequest, "resolve">) =>
+      new Promise<boolean>((resolve) => {
+        setConfirmReq({ ...opts, resolve });
+      }),
+    [],
+  );
 
   const pushLog = useCallback((level: LogLevel, msg: string) => {
     if (!msg) return;
@@ -263,13 +288,16 @@ function App() {
     const touched =
       (editId && editId === store.default_id) || (!editId && next.profiles.length === 1);
     if (live && touched) {
-      const yes = await ask("配置已变更，是否立即重启网关？", {
+      const yes = await confirm({
         title: "重启网关",
-        kind: "info",
-        okLabel: "重启",
-        cancelLabel: "稍后",
+        content: "配置已变更，是否立即重启网关？",
+        okText: "立即重启",
+        cancelText: "稍后",
       });
-      if (yes) void api.restart();
+      if (yes) {
+        beginAction("restart", "正在重启网关…");
+        void api.restart();
+      }
     }
   };
 
@@ -456,11 +484,11 @@ function App() {
                         pendingKey.current = null;
                         pushLog("OK", "已设为默认");
                         if (live) {
-                          const yes = await ask("是否立即重启网关？", {
-                            title: "重启",
-                            kind: "info",
-                            okLabel: "重启",
-                            cancelLabel: "稍后",
+                          const yes = await confirm({
+                            title: "重启网关",
+                            content: "默认模型已切换，是否立即重启网关？",
+                            okText: "立即重启",
+                            cancelText: "稍后",
                           });
                           if (yes) {
                             beginAction("restart", "正在重启网关…");
@@ -480,11 +508,12 @@ function App() {
                       const p = store.profiles.find((x) => x.id === id);
                       if (!p) return;
                       const wasDefault = p.id === store.default_id;
-                      const ok = await ask(`删除「${p.name}」？`, {
+                      const ok = await confirm({
                         title: "确认删除",
-                        kind: "warning",
-                        okLabel: "删除",
-                        cancelLabel: "取消",
+                        content: `删除模型配置「${p.name}」？此操作不可撤销。`,
+                        okText: "删除",
+                        cancelText: "取消",
+                        danger: true,
                       });
                       if (!ok) return;
                       beginAction("delete", "正在删除…");
@@ -494,15 +523,12 @@ function App() {
                         pendingKey.current = null;
                         pushLog("OK", `已删除 ${p.name}`);
                         if (live && wasDefault) {
-                          const yes = await ask(
-                            "删除的是默认模型。是否立即重启网关以应用新的默认配置？",
-                            {
-                              title: "重启网关",
-                              kind: "info",
-                              okLabel: "重启",
-                              cancelLabel: "稍后",
-                            },
-                          );
+                          const yes = await confirm({
+                            title: "重启网关",
+                            content: "删除的是默认模型。是否立即重启网关以应用新的默认配置？",
+                            okText: "立即重启",
+                            cancelText: "稍后",
+                          });
                           if (yes) {
                             beginAction("restart", "正在重启网关…");
                             void api.restart();
@@ -534,11 +560,12 @@ function App() {
                     onScript={(key, label, script, confirmText) => {
                       void (async () => {
                         if (confirmText) {
-                          const ok = await ask(confirmText, {
+                          const ok = await confirm({
                             title: label,
-                            kind: "warning",
-                            okLabel: "继续",
-                            cancelLabel: "取消",
+                            content: confirmText,
+                            okText: "继续",
+                            cancelText: "取消",
+                            danger: key.includes("restore"),
                           });
                           if (!ok) {
                             pushLog("DIM", `已取消 · ${label}`);
@@ -612,13 +639,103 @@ function App() {
             try {
               await saveModel(input, editId);
             } catch (e) {
-              await dialogMessage(String(e), { title: "保存失败", kind: "error" });
+              setNotice({
+                title: "保存失败",
+                content: String(e),
+                type: "error",
+              });
               throw e;
             }
           }}
         />
       )}
+
+      <AppConfirmModal
+        request={confirmReq}
+        onClose={(ok) => {
+          const req = confirmReq;
+          setConfirmReq(null);
+          req?.resolve(ok);
+        }}
+      />
+
+      <AppNoticeModal
+        notice={notice}
+        onClose={() => setNotice(null)}
+      />
     </>
+  );
+}
+
+function AppConfirmModal({
+  request,
+  onClose,
+}: {
+  request: ConfirmRequest | null;
+  onClose: (ok: boolean) => void;
+}) {
+  if (!request) return null;
+  return (
+    <Modal
+      open
+      title={request.title}
+      onCancel={() => onClose(false)}
+      footer={
+        <Flexbox horizontal gap={8} distribution="flex-end">
+          <Button onClick={() => onClose(false)}>{request.cancelText || "取消"}</Button>
+          <Button
+            type="primary"
+            danger={request.danger}
+            onClick={() => onClose(true)}
+          >
+            {request.okText || "确定"}
+          </Button>
+        </Flexbox>
+      }
+      width={420}
+      destroyOnClose
+    >
+      <Flexbox horizontal gap={12} align="flex-start">
+        <Icon
+          icon={AlertTriangle}
+          size="large"
+          style={{ color: request.danger ? "#ff6b7a" : "#f4d28a", marginTop: 2 }}
+        />
+        <Text style={{ lineHeight: 1.6 }}>{request.content}</Text>
+      </Flexbox>
+    </Modal>
+  );
+}
+
+function AppNoticeModal({
+  notice,
+  onClose,
+}: {
+  notice: NoticeRequest | null;
+  onClose: () => void;
+}) {
+  if (!notice) return null;
+  return (
+    <Modal
+      open
+      title={notice.title}
+      onCancel={onClose}
+      footer={
+        <Flexbox horizontal distribution="flex-end">
+          <Button type="primary" onClick={onClose}>
+            知道了
+          </Button>
+        </Flexbox>
+      }
+      width={420}
+      destroyOnClose
+    >
+      <Alert
+        type={notice.type === "error" ? "error" : notice.type === "success" ? "success" : "info"}
+        showIcon
+        message={notice.content}
+      />
+    </Modal>
   );
 }
 
