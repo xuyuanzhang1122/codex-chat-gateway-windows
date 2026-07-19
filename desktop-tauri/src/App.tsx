@@ -1935,12 +1935,11 @@ function CreditBar({ info }: { info: ProjectInfo | null }) {
           void openUrl(info?.github || GITHUB);
         }}
       >
-        github.com/xuyuanzhang1122/codex-chat-gateway-windows
+        codex-chat-gateway
       </a>
       <span>·</span>
-      <span>Owner: xuyuanzhang1122</span>
+      <span>@{info?.credits.owner || "xuyuanzhang1122"}</span>
       <span>·</span>
-      <span>UI by</span>
       <a
         href={LOBE_UI}
         onClick={(e) => {
@@ -1948,10 +1947,10 @@ function CreditBar({ info }: { info: ProjectInfo | null }) {
           void openUrl(LOBE_UI);
         }}
       >
-        LobeHub UI
+        LobeHub
       </a>
       <span>·</span>
-      <span>MIT · 社区网关，非 OpenAI 官方</span>
+      <span>MIT · 非 OpenAI 官方</span>
     </div>
   );
 }
