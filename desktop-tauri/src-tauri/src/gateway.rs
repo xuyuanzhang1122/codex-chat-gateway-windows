@@ -701,25 +701,25 @@ impl GatewayManager {
         let root = project_root();
         let mut killed = Vec::new();
 
-        // Drop owned child first (we spawned it this session).
+        // Stop the owned child first. A live `Child` handle is stronger ownership
+        // evidence than a best-effort sysinfo cmdline lookup (pythonw cmdlines can
+        // be unavailable on Windows). Never call `wait()` on a process we skipped:
+        // that would block the stop worker forever while the gateway is still live.
         {
             let mut g = self.inner.write();
             if let Some(mut child) = g.child.take() {
                 let pid = child.id();
-                // Still verify identity before kill — PID reuse is rare mid-session but cheap to check.
-                if process_is_our_gateway(&root, pid) {
-                    if kill_pid_tree(pid) {
+                match stop_owned_child(&mut child) {
+                    OwnedChildStop::AlreadyExited => {
+                        emit_log(app, "DIM", &format!("会话子进程 PID {pid} 已退出"));
+                    }
+                    OwnedChildStop::Stopped => {
                         killed.push(pid);
                         emit_log(app, "DIM", &format!("已停止会话子进程 PID {pid}"));
                     }
-                    let _ = child.wait();
-                } else {
-                    emit_log(
-                        app,
-                        "DIM",
-                        &format!("会话 PID {pid} 已不是本网关进程，跳过 kill"),
-                    );
-                    let _ = child.wait();
+                    OwnedChildStop::Failed(e) => {
+                        emit_log(app, "ERR", &format!("停止会话子进程 PID {pid} 失败: {e}"));
+                    }
                 }
             }
         }
@@ -765,7 +765,7 @@ impl GatewayManager {
 
             // Fallback: whatever listens on our gateway port and runs run_gateway.py
             // IS a gateway instance (covers leftovers spawned by other install dirs).
-            if let Some(pid) = find_port_listener_gateway_pid(GATEWAY_PORT) {
+            if let Some(pid) = find_port_listener_gateway_pid(&root, GATEWAY_PORT) {
                 if !killed.contains(&pid) && kill_pid_tree(pid) {
                     emit_log(
                         app,
@@ -1021,6 +1021,30 @@ fn kill_pid_raw(pid: u32) -> bool {
     kill_pid_tree(pid)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum OwnedChildStop {
+    AlreadyExited,
+    Stopped,
+    Failed(String),
+}
+
+fn stop_owned_child(child: &mut std::process::Child) -> OwnedChildStop {
+    match child.try_wait() {
+        Ok(Some(_)) => OwnedChildStop::AlreadyExited,
+        Ok(None) => {
+            let pid = child.id();
+            if !kill_pid_tree(pid) {
+                return OwnedChildStop::Failed("进程树终止失败".into());
+            }
+            // Reap only when it is already observable as exited; dropping a
+            // still-transitioning handle must never stall the stop worker.
+            let _ = child.try_wait();
+            OwnedChildStop::Stopped
+        }
+        Err(e) => OwnedChildStop::Failed(format!("无法读取进程状态: {e}")),
+    }
+}
+
 /// Kill the process and its children. On Windows, prefer `taskkill /T /F` so
 /// orphaned python/litellm workers on port 4000 do not keep the health probe green.
 fn kill_pid_tree(pid: u32) -> bool {
@@ -1052,6 +1076,8 @@ fn kill_pid_tree(pid: u32) -> bool {
 }
 
 /// Dual check: executable path (python/pythonw tolerant) + cmdline contains our runner under root.
+/// On Windows, an exact runtime executable that owns the gateway port is accepted when
+/// sysinfo cannot expose pythonw's command line.
 fn process_matches(root: &Path, pid: u32, expected_exe: &str, expected_runner: &str) -> bool {
     let mut sys = System::new();
     let handle = sysinfo::Pid::from_u32(pid);
@@ -1064,38 +1090,8 @@ fn process_matches(root: &Path, pid: u32, expected_exe: &str, expected_runner: &
         .exe()
         .map(|p| normalize_path_text(p))
         .unwrap_or_default();
-    let expected = normalize_text(expected_exe);
-    if !actual_exe.is_empty() && !expected.is_empty() {
-        let actual_stem = Path::new(&actual_exe)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let expected_stem = Path::new(&expected)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let both_python = actual_stem.starts_with("python") && expected_stem.starts_with("python");
-        if !both_python && actual_exe != expected {
-            return false;
-        }
-        if both_python {
-            let a_dir = Path::new(&actual_exe)
-                .parent()
-                .map(normalize_path_text)
-                .unwrap_or_default();
-            let e_dir = Path::new(&expected)
-                .parent()
-                .map(|p| normalize_text(&p.to_string_lossy()))
-                .unwrap_or_default();
-            // Prefer same runtime directory; if dirs differ still require cmdline ownership.
-            if !a_dir.is_empty() && !e_dir.is_empty() && a_dir != e_dir {
-                // fall through to cmdline check only
-            } else if actual_exe != expected && !both_python {
-                return false;
-            }
-        }
+    if !executable_identity_matches(&actual_exe, expected_exe) {
+        return false;
     }
 
     let runner_name = Path::new(expected_runner)
@@ -1107,8 +1103,9 @@ fn process_matches(root: &Path, pid: u32, expected_exe: &str, expected_runner: &
     let root_n = normalize_path_text(root);
     let runner_n = normalize_text(expected_runner);
 
-    cmd_n.contains(&runner_name.to_ascii_lowercase())
-        && (cmd_n.contains(&root_n) || cmd_n.contains(&runner_n))
+    let cmdline_matches = cmd_n.contains(&runner_name.to_ascii_lowercase())
+        && (cmd_n.contains(&root_n) || cmd_n.contains(&runner_n));
+    cmdline_matches || pid_listens_on_port(pid, GATEWAY_PORT)
 }
 
 fn process_is_our_gateway(root: &Path, pid: u32) -> bool {
@@ -1119,12 +1116,60 @@ fn process_is_our_gateway(root: &Path, pid: u32) -> bool {
         return false;
     };
     let cmd_n = normalize_text(&process_cmdline(proc));
-    if !cmd_n.contains("run_gateway.py") {
-        return false;
-    }
     let root_n = normalize_path_text(root);
     let runner_n = normalize_path_text(&run_gateway_py(root));
-    cmd_n.contains(&root_n) || cmd_n.contains(&runner_n)
+    let cmdline_matches = cmd_n.contains("run_gateway.py")
+        && (cmd_n.contains(&root_n) || cmd_n.contains(&runner_n));
+    cmdline_matches
+        || (process_executable_is_project_runtime(root, proc)
+            && pid_listens_on_port(pid, GATEWAY_PORT))
+}
+
+fn executable_identity_matches(actual_exe: &str, expected_exe: &str) -> bool {
+    let actual = normalize_text(actual_exe);
+    let expected = normalize_text(expected_exe);
+    if actual.is_empty() || expected.is_empty() {
+        return false;
+    }
+    if actual == expected {
+        return true;
+    }
+
+    let actual_path = Path::new(&actual);
+    let expected_path = Path::new(&expected);
+    let actual_stem = actual_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let expected_stem = expected_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if !actual_stem.starts_with("python") || !expected_stem.starts_with("python") {
+        return false;
+    }
+
+    let actual_dir = actual_path
+        .parent()
+        .map(normalize_path_text)
+        .unwrap_or_default();
+    let expected_dir = expected_path
+        .parent()
+        .map(normalize_path_text)
+        .unwrap_or_default();
+    !actual_dir.is_empty() && actual_dir == expected_dir
+}
+
+fn process_executable_is_project_runtime(root: &Path, proc: &sysinfo::Process) -> bool {
+    let actual_exe = proc
+        .exe()
+        .map(normalize_path_text)
+        .unwrap_or_default();
+    python_runtime(root)
+        .map(|expected| {
+            executable_identity_matches(&actual_exe, &expected.to_string_lossy())
+        })
+        .unwrap_or(false)
 }
 
 fn process_cmdline(proc: &sysinfo::Process) -> String {
@@ -1139,10 +1184,9 @@ fn find_gateway_pid(root: &Path) -> Option<u32> {
     find_all_gateway_pids(root).into_iter().next()
 }
 
-/// PID of the process listening on 127.0.0.1:`port` whose cmdline contains
-/// run_gateway.py, regardless of which install directory it came from.
+/// PID of the process listening on 127.0.0.1:`port`.
 #[cfg(windows)]
-fn find_port_listener_gateway_pid(port: u16) -> Option<u32> {
+fn find_port_listener_pid(port: u16) -> Option<u32> {
     let mut cmd = Command::new("netstat");
     cmd.args(["-ano", "-p", "tcp"]);
     {
@@ -1162,17 +1206,19 @@ fn find_port_listener_gateway_pid(port: u16) -> Option<u32> {
             continue;
         }
         if let Ok(pid) = cols[4].parse::<u32>() {
-            if pid_cmdline_is_gateway(pid) {
-                return Some(pid);
-            }
+            return Some(pid);
         }
     }
     None
 }
 
 #[cfg(not(windows))]
-fn find_port_listener_gateway_pid(_port: u16) -> Option<u32> {
+fn find_port_listener_pid(_port: u16) -> Option<u32> {
     None
+}
+
+fn pid_listens_on_port(pid: u32, port: u16) -> bool {
+    find_port_listener_pid(port) == Some(pid)
 }
 
 fn pid_cmdline_is_gateway(pid: u32) -> bool {
@@ -1180,12 +1226,16 @@ fn pid_cmdline_is_gateway(pid: u32) -> bool {
     let handle = sysinfo::Pid::from_u32(pid);
     sys.refresh_processes(ProcessesToUpdate::Some(&[handle]), true);
     sys.process(handle)
-        .map(|p| {
-            p.cmd()
-                .iter()
-                .any(|a| a.to_string_lossy().to_lowercase().contains("run_gateway.py"))
-        })
+        .map(|proc| normalize_text(&process_cmdline(proc)).contains("run_gateway.py"))
         .unwrap_or(false)
+}
+
+/// Port ownership plus this installation's embedded/venv Python executable is a
+/// safe Windows fallback when the process command line cannot be inspected. A
+/// visible run_gateway.py cmdline remains sufficient for older install roots.
+fn find_port_listener_gateway_pid(root: &Path, port: u16) -> Option<u32> {
+    let pid = find_port_listener_pid(port)?;
+    (process_is_our_gateway(root, pid) || pid_cmdline_is_gateway(pid)).then_some(pid)
 }
 
 fn find_all_gateway_pids(root: &Path) -> Vec<u32> {
@@ -1407,4 +1457,53 @@ fn dirs_startup() -> Option<PathBuf> {
             .join("Programs")
             .join("Startup"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{executable_identity_matches, stop_owned_child, OwnedChildStop};
+
+    #[test]
+    fn python_and_pythonw_in_same_runtime_are_same_identity() {
+        assert!(executable_identity_matches(
+            r"C:\Program Files\Codex Chat Gateway\runtime\pythonw.exe",
+            r"C:\Program Files\Codex Chat Gateway\runtime\python.exe",
+        ));
+    }
+
+    #[test]
+    fn python_in_another_runtime_is_not_same_identity() {
+        assert!(!executable_identity_matches(
+            r"C:\Other App\runtime\pythonw.exe",
+            r"C:\Program Files\Codex Chat Gateway\runtime\python.exe",
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owned_live_child_is_stopped_without_waiting_for_natural_exit() {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = Command::new("powershell.exe");
+        command
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .creation_flags(CREATE_NO_WINDOW);
+        let mut child = command.spawn().expect("spawn disposable test child");
+        let started = Instant::now();
+        let outcome = stop_owned_child(&mut child);
+        if outcome != OwnedChildStop::Stopped {
+            let _ = child.kill();
+        }
+
+        assert_eq!(outcome, OwnedChildStop::Stopped);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 }
