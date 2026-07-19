@@ -131,7 +131,7 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @files --clobber
           } else {
-            $notes = "Codex Chat Gateway Studio $tag`n`n- Studio console (Tauri 2 + LobeHub)`n- Gateway binds to 127.0.0.1 only`n- Auto-update via latest.json when present`n`nREADME: https://github.com/xuyuanzhang1122/codex-chat-gateway-windows#readme"
+            $notes = "Codex Chat Gateway Studio $tag`n`n" + (./scripts/release-notes.ps1 -Version ($tag -replace '^v',''))
             gh release create $tag @files --title $tag --notes $notes
           }
 
@@ -204,14 +204,16 @@ jobs:
             Write-Host "No legacy files to upload"
             exit 0
           }
-          for ($i = 0; $i -lt 30; $i++) {
-            gh release view $tag *> $null
-            if ($LASTEXITCODE -eq 0) { break }
-            Start-Sleep -Seconds 10
-          }
+          # The Studio job publishes the release, but both jobs run in parallel and
+          # this job usually finishes first — so create the release here if it is
+          # missing instead of racing a wait loop against the other job.
           gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag @files --clobber
-          } else {
-            Write-Host "Release $tag not found yet; skipping legacy upload"
+          if ($LASTEXITCODE -ne 0) {
+            $notes = "Codex Chat Gateway Studio $tag`n`n" + (./scripts/release-notes.ps1 -Version ($tag -replace '^v',''))
+            gh release create $tag --title $tag --notes $notes
+            if ($LASTEXITCODE -ne 0) {
+              # Lost the race with the Studio job between view and create; that is fine.
+              Write-Host 'Release was created concurrently; continuing with upload.'
+            }
           }
+          gh release upload $tag @files --clobber
