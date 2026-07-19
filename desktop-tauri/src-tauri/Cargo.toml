@@ -1,6 +1,6 @@
 [package]
 name = "codex-chat-gateway-desktop"
-version = "1.3.0"
+version = "1.4.0"
 description = "Codex Chat Gateway desktop console (Tauri) — https://github.com/xuyuanzhang1122/codex-chat-gateway-windows"
 authors = ["xuyuanzhang1122", "codex-chat-gateway contributors"]
 edition = "2021"

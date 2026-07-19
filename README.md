@@ -35,6 +35,12 @@
   <img src="docs/assets/studio-gateway.png" width="920" alt="Studio console">
 </p>
 
+## New in v1.4.0
+
+- **Route one model across several providers or accounts.** Enable routing per model, switch individual upstreams on or off, and keep a preferred default route.
+- **Cache-aware instead of randomly hopping.** Requests from the same session stay with the same upstream whenever possible, preserving that provider's prompt cache; cooldown and failover only move traffic when needed.
+- **See where requests actually went.** The Routing Preview page draws persistent animated model → upstream connections and aggregates hit count / last-used time without storing prompts, responses, API keys, or request IDs.
+
 ## What is this
 
 Codex speaks the Responses API. Claude Desktop's Code mode speaks Anthropic Messages. Most third-party models only offer OpenAI-style Chat Completions — so good models sit unused because the protocols don't line up.
@@ -80,8 +86,8 @@ model:deepseek-v4-flash,deepseek-v4-pro
 | | |
 |---|---|
 | **Studio console** | Tauri 2 + React + [LobeHub UI](https://ui.lobehub.com/), frameless dark UI; closing the window just sends it to the tray — **the gateway keeps running**. |
-| **Models** | CRUD, default-model switching, online `/models` fetch, one-click txt import. |
-| **Multi-account routing** | Weighted routing across accounts serving the same model, with session/cache affinity, cooldown, failover, and a live model → upstream traffic map. See [routing behavior](docs/MODEL_ROUTING.md). |
+| **Models** | CRUD, default-model switching, online `/models` fetch, one-click txt import, and grouped per-model routing controls. |
+| **Multi-account routing** | Weighted routing across accounts serving the same model, with session/cache affinity, per-upstream switches, cooldown, failover, and a live model → upstream traffic map. See [routing behavior](docs/MODEL_ROUTING.md). |
 | **Client wiring** | One-click Codex provider and Claude Desktop Code mode (3P Profile); one-click restore keeps your MCP servers and other profiles untouched. |
 | **Auto-update** | Click "Check for updates" in the console; update packages are minisign-verified and **never touch your `.gateway` config**. |
 | **Installer** | Per-user install (no admin needed), English/Chinese UI, optional login autostart; can remove the legacy C# desktop for you. |

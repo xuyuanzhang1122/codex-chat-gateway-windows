@@ -12,7 +12,7 @@
 
 | 检查 | Studio（正确） | 旧 WPF（错误） |
 |---|---|---|
-| 安装包文件名 | `CodexChatGateway-**Studio**-Setup-v1.3.0.exe` | `CodexChatGateway-Setup-v1.2.0.exe` |
+| 安装包文件名 | `CodexChatGateway-**Studio**-Setup-vX.Y.Z.exe` | `CodexChatGateway-Setup-v1.2.0.exe` |
 | 主程序体积 | 约 **10MB+** | 约 **100–200KB** |
 | 启动界面 | 深色 LobeHub / 侧栏 / 进入控制台 | 旧粒子 WPF 控制台 |
 | 目录标记 | 安装目录有 `STUDIO` 文件 | 无 |
@@ -62,8 +62,9 @@ dist-installer/CodexChatGateway-Studio-Setup-vX.Y.Z.exe.sha256
 ```powershell
 # 1) VERSION / tauri.conf.json / package.json 已对齐
 git push origin main
-git tag v1.3.0
-git push origin v1.3.0
+$version = Get-Content .\VERSION
+git tag "v$version"
+git push origin "v$version"
 # 2) 在 Actions 页查看 "Build Studio release"
 ```
 

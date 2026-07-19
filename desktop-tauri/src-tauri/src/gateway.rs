@@ -1138,7 +1138,7 @@ pub fn read_version() -> String {
     let root = project_root();
     fs::read_to_string(root.join("VERSION"))
         .map(|s| format!("v{}", s.trim()))
-        .unwrap_or_else(|_| "v1.3.0-tauri".into())
+        .unwrap_or_else(|_| "v1.4.0-tauri".into())
 }
 
 pub fn autostart_enabled() -> bool {

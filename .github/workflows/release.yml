@@ -131,8 +131,14 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @files --clobber
           } else {
-            $notes = "Codex Chat Gateway Studio $tag`n`n" + (./scripts/release-notes.ps1 -Version ($tag -replace '^v',''))
-            gh release create $tag @files --title $tag --notes $notes
+            $version = $tag -replace '^v',''
+            $releaseNotesPath = "docs/RELEASE_v$version.md"
+            if (Test-Path -LiteralPath $releaseNotesPath) {
+              $notes = Get-Content -LiteralPath $releaseNotesPath -Raw
+            } else {
+              $notes = "Codex Chat Gateway Studio $tag`n`n" + (./scripts/release-notes.ps1 -Version $version)
+            }
+            gh release create $tag @files --title "Codex Chat Gateway Studio $tag" --notes $notes
           }
 
   legacy-portable-windows-x64:
@@ -209,8 +215,14 @@ jobs:
           # missing instead of racing a wait loop against the other job.
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
-            $notes = "Codex Chat Gateway Studio $tag`n`n" + (./scripts/release-notes.ps1 -Version ($tag -replace '^v',''))
-            gh release create $tag --title $tag --notes $notes
+            $version = $tag -replace '^v',''
+            $releaseNotesPath = "docs/RELEASE_v$version.md"
+            if (Test-Path -LiteralPath $releaseNotesPath) {
+              $notes = Get-Content -LiteralPath $releaseNotesPath -Raw
+            } else {
+              $notes = "Codex Chat Gateway Studio $tag`n`n" + (./scripts/release-notes.ps1 -Version $version)
+            }
+            gh release create $tag --title "Codex Chat Gateway Studio $tag" --notes $notes
             if ($LASTEXITCODE -ne 0) {
               # Lost the race with the Studio job between view and create; that is fine.
               Write-Host 'Release was created concurrently; continuing with upload.'
