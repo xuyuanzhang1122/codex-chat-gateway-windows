@@ -36,7 +36,7 @@
   <br><sub>Gateway overview — start, stop, restart, health check, endpoint, and recent operations.</sub>
 </p>
 
-## New in v1.4.0
+## New in v1.4.*
 
 - **Route one model across several providers or accounts.** Enable routing per model, switch individual upstreams on or off, and keep a preferred default route.
 - **Cache-aware instead of randomly hopping.** Requests from the same session stay with the same upstream whenever possible, preserving that provider's prompt cache; cooldown and failover only move traffic when needed.
