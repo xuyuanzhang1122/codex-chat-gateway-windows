@@ -17,3 +17,6 @@
 - Studio 安装包由 `scripts/build-tauri-installer.ps1` 构建；关闭控制台不得默认杀掉网关进程。
 - 自动更新仅允许 HTTPS GitHub Release 通道（`latest.json` + 签名 NSIS 包）；公钥可进仓库，**私钥不得提交**（用 `TAURI_SIGNING_PRIVATE_KEY` / `_PATH`）。
 - 更新不得改写 `.gateway/models.json` 或日志中的密钥；更新控制台不得默认杀掉网关进程。
+- 发版流程：先更新 `VERSION` 并在 `CHANGELOG.md` 写好对应版本段落，再推送 `v*.*.*` tag 触发 `.github/workflows/release.yml`；tag 必须与 `VERSION` 完全一致。
+- Release notes 由 `scripts/release-notes.ps1` 从 `CHANGELOG.md` 自动提取；Studio 与 legacy 两个构建 job 并行，任一方先到都要能在 Release 缺失时创建它，不得依赖 job 完成顺序。
+- 构建/发布脚本必须兼容 Windows PowerShell 5.1：纯 ASCII，不依赖模块自动加载（如 `Get-FileHash`），哈希等基础能力直接用 .NET 实现。
