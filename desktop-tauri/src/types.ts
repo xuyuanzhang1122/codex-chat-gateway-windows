@@ -76,6 +76,8 @@ export interface GatewayStatus {
   message: string;
   routes: string[];
   busy: boolean;
+  startup_progress: number | null;
+  startup_stage: string | null;
 }
 
 export interface ActionResult {

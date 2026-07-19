@@ -229,8 +229,29 @@ fn run_script(
     if !ALLOWED.contains(&name.as_str()) {
         return Err(format!("不允许执行脚本: {name}"));
     }
+    let was_running = {
+        let status = state.gateway.snapshot();
+        status.running || status.healthy
+    };
     let mut result = run_project_script(&name)?;
-    result.status = state.gateway.snapshot();
+    result.status = state.gateway.refresh_full();
+    let should_recover = result.ok
+        && was_running
+        && !result.status.running
+        && matches!(
+            name.as_str(),
+            "configure-codex.ps1" | "configure-claude-desktop.ps1"
+        );
+    if should_recover {
+        let _ = app.emit(
+            "gateway://log",
+            gateway::LogEvent {
+                level: "INFO".into(),
+                message: "客户端配置后检测到网关进程已退出，正在自动恢复…".into(),
+            },
+        );
+        state.gateway.start_background(app.clone());
+    }
     // surface script logs through the same event bus
     for line in &result.logs {
         let _ = app.emit(

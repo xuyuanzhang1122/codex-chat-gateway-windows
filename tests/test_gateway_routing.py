@@ -80,6 +80,7 @@ def main() -> None:
         try:
             os.environ["CCG_DISABLE_MULTI_ACCOUNT_ROUTING"] = "1"
             assert gateway_runtime._read_routing_pool() is None
+            assert gateway_runtime._read_runtime_pool() is None
             os.environ.pop("CCG_DISABLE_MULTI_ACCOUNT_ROUTING")
 
             # A v1 store has no global opt-in, so an upgrade keeps single-account behavior.
@@ -88,6 +89,21 @@ def main() -> None:
                 encoding="utf-8",
             )
             assert gateway_runtime._read_routing_pool() is None
+            single = gateway_runtime._read_runtime_pool()
+            assert single is not None
+            assert single[0]["enabled"] is False
+            assert [item["id"] for item in single[1]] == ["account-a"]
+
+            annotated = gateway_runtime._build_runtime_config(
+                BASE_CONFIG,
+                single[0],
+                single[1],
+            )
+            annotated_codex = next(
+                item for item in annotated["model_list"] if item["model_name"] == "codex-chat"
+            )
+            assert annotated_codex["model_info"]["ccg_profile_id"] == "account-a"
+            assert annotated["router_settings"]["max_fallbacks"] == 0
 
             models_path.write_text(
                 json.dumps(

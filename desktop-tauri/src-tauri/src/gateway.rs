@@ -71,6 +71,8 @@ pub struct GatewayStatus {
     pub message: String,
     pub routes: Vec<String>,
     pub busy: bool,
+    pub startup_progress: Option<u8>,
+    pub startup_stage: Option<String>,
 }
 
 impl Default for GatewayStatus {
@@ -89,6 +91,8 @@ impl Default for GatewayStatus {
             message: "未启动".into(),
             routes: Vec::new(),
             busy: false,
+            startup_progress: None,
+            startup_stage: None,
         }
     }
 }
@@ -201,6 +205,8 @@ impl GatewayManager {
             }
             if g.status.phase == GatewayPhase::Starting {
                 g.status.phase = GatewayPhase::Running;
+                g.status.startup_progress = None;
+                g.status.startup_stage = None;
             }
             if g.status.message.is_empty()
                 || g.status.message == "网关未在运行"
@@ -237,6 +243,8 @@ impl GatewayManager {
                     g.status.is_our_gateway = false;
                     g.status.message = "网关未在运行".into();
                     g.status.routes.clear();
+                    g.status.startup_progress = None;
+                    g.status.startup_stage = None;
                 } else {
                     g.status.running = true;
                     g.status.message = "进程在线，健康检查未通过".into();
@@ -247,6 +255,8 @@ impl GatewayManager {
                 g.status.phase = GatewayPhase::Stopped;
                 g.status.message = "网关未在运行".into();
                 g.status.routes.clear();
+                g.status.startup_progress = None;
+                g.status.startup_stage = None;
             }
         }
 
@@ -302,6 +312,8 @@ impl GatewayManager {
             } else {
                 GatewayPhase::Stopped
             };
+            g.status.startup_progress = None;
+            g.status.startup_stage = None;
         }
 
         g.status.message = if !g.status.running {
@@ -405,6 +417,8 @@ impl GatewayManager {
             g.status.busy = true;
             g.status.phase = GatewayPhase::Starting;
             g.status.message = "正在启动…".into();
+            g.status.startup_progress = Some(4);
+            g.status.startup_stage = Some("准备本地运行环境".into());
         }
         emit_status(app, &self.snapshot());
         emit_log(app, "INFO", "▶ 启动网关");
@@ -426,6 +440,8 @@ impl GatewayManager {
                     g.status.is_our_gateway = true;
                     g.status.routes = routes;
                     g.status.message = "网关已在运行".into();
+                    g.status.startup_progress = None;
+                    g.status.startup_stage = None;
                     if let Some(file) = read_state_file(&root) {
                         g.status.pid = Some(file.pid);
                         g.status.model = Some(file.model);
@@ -445,6 +461,8 @@ impl GatewayManager {
                 g.status.running = true;
                 g.status.is_our_gateway = false;
                 g.status.message = "端口 4000 被其他服务占用".into();
+                g.status.startup_progress = None;
+                g.status.startup_stage = None;
             }
             emit_log(app, "ERR", "端口 4000 被其他服务占用，拒绝启动");
             emit_status(app, &self.snapshot());
@@ -473,6 +491,14 @@ impl GatewayManager {
             self.fail_start(app, "缺少 run_gateway.py 或 config.yaml");
             return;
         }
+
+        {
+            let mut g = self.inner.write();
+            g.status.startup_progress = Some(16);
+            g.status.startup_stage = Some("检查模型配置与 Python 运行时".into());
+            g.status.message = "正在检查启动环境…".into();
+        }
+        emit_status(app, &self.snapshot());
 
         let log_dir = logs_dir(&root);
         let _ = fs::create_dir_all(&log_dir);
@@ -558,6 +584,9 @@ impl GatewayManager {
             g.status.started_at = Some(started_at);
             g.status.default_model_name = Some(profile.name.clone());
             g.default_name = Some(profile.name.clone());
+            g.status.startup_progress = Some(28);
+            g.status.startup_stage = Some("加载 LiteLLM 与路由配置".into());
+            g.status.message = "网关进程已创建，正在等待接口就绪…".into();
         }
         emit_status(app, &self.snapshot());
 
@@ -568,6 +597,16 @@ impl GatewayManager {
             if !pid_alive(pid) {
                 emit_log(app, "ERR", &format!("进程在就绪前退出（attempt {attempt}）"));
                 break;
+            }
+            if attempt % 3 == 0 {
+                let progress = 30 + ((attempt as u8).saturating_mul(62) / 50);
+                {
+                    let mut g = self.inner.write();
+                    g.status.startup_progress = Some(progress.min(92));
+                    g.status.startup_stage = Some("等待本地接口和路由就绪".into());
+                    g.status.message = format!("首次加载可能较慢 · 启动检查 {}/50", attempt + 1);
+                }
+                emit_status(app, &self.snapshot());
             }
             if health_probe(300) {
                 let routes = list_routes().unwrap_or_default();
@@ -598,6 +637,8 @@ impl GatewayManager {
                 g.status.healthy = false;
                 g.status.pid = None;
                 g.status.message = "启动失败，见 logs/gateway.stderr.log".into();
+                g.status.startup_progress = None;
+                g.status.startup_stage = None;
             }
             emit_log(app, "ERR", "网关未能就绪，已回滚");
             emit_status(app, &self.snapshot());
@@ -612,6 +653,8 @@ impl GatewayManager {
             g.status.running = true;
             g.status.healthy = true;
             g.status.is_our_gateway = true;
+            g.status.startup_progress = None;
+            g.status.startup_stage = None;
             g.status.message = format!(
                 "运行中 · {} ({})",
                 profile.name, profile.litellm_model
@@ -635,6 +678,8 @@ impl GatewayManager {
             g.status.busy = false;
             g.status.phase = GatewayPhase::Error;
             g.status.message = msg.into();
+            g.status.startup_progress = None;
+            g.status.startup_stage = None;
         }
         emit_log(app, "ERR", msg);
         emit_status(app, &self.snapshot());
@@ -647,6 +692,8 @@ impl GatewayManager {
             g.status.busy = true;
             g.status.phase = GatewayPhase::Stopping;
             g.status.message = "正在停止…".into();
+            g.status.startup_progress = None;
+            g.status.startup_stage = None;
         }
         emit_status(app, &self.snapshot());
         emit_log(app, "INFO", "▶ 停止网关");

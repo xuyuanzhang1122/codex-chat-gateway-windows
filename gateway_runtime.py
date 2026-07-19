@@ -95,6 +95,40 @@ def _read_routing_pool() -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
     return routing, pool
 
 
+def _read_runtime_pool() -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    """Return the deployments that need privacy-safe traffic metadata.
+
+    Multi-account routing already builds a generated runtime config.  A single
+    default account used to keep the unannotated base config, which meant real
+    requests worked but the routing preview could never learn which upstream
+    was selected.  Generate the same metadata-bearing config for that default
+    account without enabling multi-account routing or failover.
+    """
+
+    routed = _read_routing_pool()
+    if routed is not None:
+        return routed
+    if os.environ.get("CCG_DISABLE_MULTI_ACCOUNT_ROUTING") == "1":
+        return None
+    if not MODELS_PATH.exists():
+        return None
+
+    try:
+        store = json.loads(MODELS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    profiles = store.get("profiles") or []
+    if not profiles:
+        return None
+    default_id = store.get("default_id") or ""
+    default = next((item for item in profiles if item.get("id") == default_id), profiles[0])
+    return {
+        "enabled": False,
+        "affinity_ttl_seconds": 3600,
+        "model_rules": [],
+    }, [default]
+
+
 def _config_argument() -> tuple[int | None, Path]:
     for index, value in enumerate(sys.argv[:-1]):
         if value == "--config":
@@ -312,7 +346,7 @@ def _build_runtime_config(
 
 
 def prepare_gateway_runtime() -> Path | None:
-    pool_result = _read_routing_pool()
+    pool_result = _read_runtime_pool()
     if pool_result is None:
         return None
 

@@ -117,6 +117,8 @@ const emptyStatus: GatewayStatus = {
   message: "检测中…",
   routes: [],
   busy: false,
+  startup_progress: null,
+  startup_stage: null,
 };
 
 const GITHUB = "https://github.com/xuyuanzhang1122/codex-chat-gateway-windows";
@@ -817,6 +819,7 @@ function App() {
                         pushLog("INFO", `▶ ${label}`);
                         try {
                           const r = await api.runScript(script);
+                          setStatus(r.status);
                           setInfo(await api.projectInfo());
                           showFeedback({
                             key,
@@ -1209,6 +1212,36 @@ function GatewayView({
           </Text>
         </Block>
       </Flexbox>
+
+      {status.phase === "starting" && (
+        <div
+          className="gateway-startup-progress"
+          role="progressbar"
+          aria-label="网关启动进度"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={status.startup_progress ?? 4}
+        >
+          <div className="gateway-startup-progress-head">
+            <div>
+              <span className="gateway-startup-kicker">BOOT SEQUENCE</span>
+              <strong>{status.startup_stage || "正在启动网关"}</strong>
+            </div>
+            <span className="gateway-startup-percent">
+              {Math.max(0, Math.min(100, status.startup_progress ?? 4))}%
+            </span>
+          </div>
+          <div className="gateway-startup-track" aria-hidden="true">
+            <span
+              className="gateway-startup-fill"
+              style={{ width: `${Math.max(4, Math.min(100, status.startup_progress ?? 4))}%` }}
+            />
+          </div>
+          <div className="gateway-startup-note">
+            首次启动需要加载本地 Python 与 LiteLLM，后续启动会更快。请保持窗口开启。
+          </div>
+        </div>
+      )}
 
       <Block variant="outlined" padding={16} style={{ flexShrink: 0 }}>
         <Flexbox gap={12}>
