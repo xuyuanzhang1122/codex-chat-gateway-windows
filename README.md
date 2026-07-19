@@ -33,6 +33,7 @@
 
 <p align="center">
   <img src="docs/assets/studio-gateway.png" width="920" alt="Studio console">
+  <br><sub>Gateway overview — start, stop, restart, health check, endpoint, and recent operations.</sub>
 </p>
 
 ## New in v1.4.0
@@ -40,6 +41,22 @@
 - **Route one model across several providers or accounts.** Enable routing per model, switch individual upstreams on or off, and keep a preferred default route.
 - **Cache-aware instead of randomly hopping.** Requests from the same session stay with the same upstream whenever possible, preserving that provider's prompt cache; cooldown and failover only move traffic when needed.
 - **See where requests actually went.** The Routing Preview page draws persistent animated model → upstream connections and aggregates hit count / last-used time without storing prompts, responses, API keys, or request IDs.
+
+### Model routing controls
+
+The Models page groups configurations by their real model ID. Turn routing on for one model, then independently include or exclude each upstream without deleting its credentials.
+
+<p align="center">
+  <img src="docs/assets/studio-model-routing-v1.4.0.png" width="920" alt="Per-model multi-account routing controls">
+</p>
+
+### Live Routing Preview
+
+Once a request uses a route, its animated connection stays on the map. This makes provider selection visible at a glance while only retaining privacy-safe aggregate metadata.
+
+<p align="center">
+  <img src="docs/assets/studio-routing-preview-v1.4.0.png" width="920" alt="Live model to upstream routing preview">
+</p>
 
 ## What is this
 
