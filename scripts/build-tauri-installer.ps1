@@ -43,6 +43,9 @@ if ($version -notmatch '^\d+\.\d+\.\d+$') {
     throw "Invalid VERSION: $version"
 }
 
+# Keep tauri.conf.json / Cargo.toml in lockstep with the root VERSION.
+& (Join-Path $PSScriptRoot 'sync-versions.ps1') -ProjectRoot $projectRoot
+
 $tauriDir = Join-Path $projectRoot 'desktop-tauri'
 if (-not (Test-Path -LiteralPath (Join-Path $tauriDir 'package.json'))) {
     throw 'desktop-tauri project is missing.'

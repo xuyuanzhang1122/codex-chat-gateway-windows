@@ -715,6 +715,19 @@ impl GatewayManager {
                 }
             }
 
+
+            // Fallback: whatever listens on our gateway port and runs run_gateway.py
+            // IS a gateway instance (covers leftovers spawned by other install dirs).
+            if let Some(pid) = find_port_listener_gateway_pid(GATEWAY_PORT) {
+                if !killed.contains(&pid) && kill_pid_tree(pid) {
+                    emit_log(
+                        app,
+                        "DIM",
+                        &format!("已停止占用 {GATEWAY_PORT} 端口的网关进程 PID {pid}"),
+                    );
+                    killed.push(pid);
+                }
+            }
             let _ = fs::remove_file(state_path(&root));
             thread::sleep(Duration::from_millis(300 + round * 150));
 
@@ -1079,6 +1092,55 @@ fn find_gateway_pid(root: &Path) -> Option<u32> {
     find_all_gateway_pids(root).into_iter().next()
 }
 
+/// PID of the process listening on 127.0.0.1:`port` whose cmdline contains
+/// run_gateway.py, regardless of which install directory it came from.
+#[cfg(windows)]
+fn find_port_listener_gateway_pid(port: u16) -> Option<u32> {
+    let mut cmd = Command::new("netstat");
+    cmd.args(["-ano", "-p", "tcp"]);
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let local = format!("127.0.0.1:{port}");
+    for line in text.lines() {
+        if !line.contains("LISTENING") {
+            continue;
+        }
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 5 || cols[1] != local {
+            continue;
+        }
+        if let Ok(pid) = cols[4].parse::<u32>() {
+            if pid_cmdline_is_gateway(pid) {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn find_port_listener_gateway_pid(_port: u16) -> Option<u32> {
+    None
+}
+
+fn pid_cmdline_is_gateway(pid: u32) -> bool {
+    let mut sys = System::new();
+    let handle = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes(ProcessesToUpdate::Some(&[handle]), true);
+    sys.process(handle)
+        .map(|p| {
+            p.cmd()
+                .iter()
+                .any(|a| a.to_string_lossy().to_lowercase().contains("run_gateway.py"))
+        })
+        .unwrap_or(false)
+}
+
 fn find_all_gateway_pids(root: &Path) -> Vec<u32> {
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::All, true);
@@ -1138,7 +1200,7 @@ pub fn read_version() -> String {
     let root = project_root();
     fs::read_to_string(root.join("VERSION"))
         .map(|s| format!("v{}", s.trim()))
-        .unwrap_or_else(|_| "v1.4.0-tauri".into())
+        .unwrap_or_else(|_| format!("v{}", env!("CARGO_PKG_VERSION")))
 }
 
 pub fn autostart_enabled() -> bool {

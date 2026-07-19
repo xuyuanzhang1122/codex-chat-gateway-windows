@@ -876,9 +876,9 @@ function App() {
                             content:
                               `当前 ${update.currentVersion} → ${update.version}\n\n` +
                               (notes ? `${notes.slice(0, 600)}\n\n` : "") +
-                              "将从 HTTPS GitHub Release 下载并校验签名后安装。\n" +
+                              "将下载完整 Studio 安装包（SHA-256 校验）并覆盖安装。\n" +
                               "不会修改 .gateway 模型密钥；网关进程不会因此被停止。\n" +
-                              "安装后会重启控制台。",
+                              "安装器启动后控制台会退出，按向导完成安装即可。",
                             okText: "下载并安装",
                             cancelText: "稍后",
                           });

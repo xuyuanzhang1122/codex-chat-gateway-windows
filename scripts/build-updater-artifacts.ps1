@@ -43,6 +43,9 @@ if ($version -notmatch '^\d+\.\d+\.\d+$') {
     throw "Invalid VERSION: $version"
 }
 
+# Keep tauri.conf.json / Cargo.toml in lockstep with the root VERSION.
+& (Join-Path $PSScriptRoot 'sync-versions.ps1') -ProjectRoot $projectRoot
+
 if (-not $ReleaseBaseUrl) {
     $ReleaseBaseUrl = "https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/download/v$version"
 }

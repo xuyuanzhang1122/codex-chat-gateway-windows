@@ -1,5 +1,6 @@
-import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export type UpdateInfo = {
   version: string;
@@ -15,7 +16,13 @@ export type UpdateProgress = {
   message: string;
 };
 
-/** Check GitHub Release latest.json (HTTPS + signed). Returns null if up to date. */
+type BackendProgress = {
+  downloaded: number;
+  total: number | null;
+  verified?: boolean;
+};
+
+/** Check GitHub Release latest.json (HTTPS). Returns null if up to date. */
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
   const update = await check();
   if (!update) return null;
@@ -28,116 +35,52 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
 }
 
 /**
- * Download + install a verified update, then relaunch the console.
- * Does not touch `.gateway/models.json` (installer / updater leaves user data).
+ * Download the full Studio (Inno) installer — SHA-256 verified by the Rust
+ * side — then launch it and let the console exit. The Inno wizard upgrades
+ * in place and preserves runtime/, scripts/ and .gateway/.
+ *
+ * We deliberately do NOT use the Tauri NSIS updater package: it bundles only
+ * the bare console exe and installs to a different directory, which produced
+ * broken half-installs (no gateway runtime, endless update prompts).
  */
-export async function downloadInstallAndRelaunch(
-  onProgress?: (p: UpdateProgress) => void,
-): Promise<void> {
-  onProgress?.({
-    phase: "checking",
-    downloaded: 0,
-    total: null,
-    message: "正在连接更新通道…",
-  });
-
-  const update = await check();
-  if (!update) {
-    throw new Error("当前已是最新版本");
-  }
-
-  let downloaded = 0;
-  let total: number | null = null;
-
-  onProgress?.({
-    phase: "downloading",
-    downloaded: 0,
-    total: null,
-    message: `正在下载 ${update.version}…`,
-  });
-
-  await update.downloadAndInstall((event: DownloadEvent) => {
-    if (event.event === "Started") {
-      total = event.data.contentLength ?? null;
-      downloaded = 0;
-      onProgress?.({
-        phase: "downloading",
-        downloaded,
-        total,
-        message: total
-          ? `正在下载 ${update.version}（0 / ${formatBytes(total)}）`
-          : `正在下载 ${update.version}…`,
-      });
-    } else if (event.event === "Progress") {
-      downloaded += event.data.chunkLength;
-      onProgress?.({
-        phase: "downloading",
-        downloaded,
-        total,
-        message: total
-          ? `正在下载 ${update.version}（${formatBytes(downloaded)} / ${formatBytes(total)}）`
-          : `正在下载 ${update.version}（${formatBytes(downloaded)}）`,
-      });
-    } else if (event.event === "Finished") {
-      onProgress?.({
-        phase: "installing",
-        downloaded,
-        total,
-        message: "下载完成，正在安装…",
-      });
-    }
-  });
-
-  onProgress?.({
-    phase: "done",
-    downloaded,
-    total,
-    message: "安装完成，即将重启控制台…",
-  });
-
-  // Console relaunch only — gateway process is independent and not killed by updater.
-  await relaunch();
-}
-
-/** Keep handle to an Update if caller already checked (avoids double fetch). */
 export async function installKnownUpdate(
   update: Update,
   onProgress?: (p: UpdateProgress) => void,
 ): Promise<void> {
-  let downloaded = 0;
-  let total: number | null = null;
+  const version = update.version;
   onProgress?.({
     phase: "downloading",
     downloaded: 0,
     total: null,
-    message: `正在下载 ${update.version}…`,
+    message: `正在下载 ${version} 完整安装包…`,
   });
-  await update.downloadAndInstall((event: DownloadEvent) => {
-    if (event.event === "Started") {
-      total = event.data.contentLength ?? null;
-      downloaded = 0;
-    } else if (event.event === "Progress") {
-      downloaded += event.data.chunkLength;
-    }
+
+  const unlisten = await listen<BackendProgress>("update://progress", (e) => {
+    const { downloaded, total, verified } = e.payload;
     onProgress?.({
-      phase: event.event === "Finished" ? "installing" : "downloading",
+      phase: verified ? "installing" : "downloading",
       downloaded,
       total,
-      message:
-        event.event === "Finished"
-          ? "下载完成，正在安装…"
-          : total
-            ? `正在下载（${formatBytes(downloaded)} / ${formatBytes(total)}）`
-            : `正在下载（${formatBytes(downloaded)}）`,
+      message: verified
+        ? "SHA-256 校验完成，正在启动安装器…"
+        : total
+          ? `正在下载 ${version}（${formatBytes(downloaded)} / ${formatBytes(total)}）`
+          : `正在下载 ${version}（${formatBytes(downloaded)}）`,
     });
   });
-  onProgress?.({
-    phase: "done",
-    downloaded,
-    total,
-    message: "安装完成，即将重启控制台…",
-  });
-  await relaunch();
+
+  try {
+    // Resolves right before the console exits for the installer.
+    await invoke("download_studio_installer", { version });
+    onProgress?.({
+      phase: "done",
+      downloaded: 0,
+      total: null,
+      message: "安装器已启动，控制台即将退出…",
+    });
+  } finally {
+    unlisten();
+  }
 }
 
 function formatBytes(n: number): string {

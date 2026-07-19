@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+
+## 1.4.2 - 2026-07-19
+
+- 重构应用内更新：检测仍走 GitHub Release（`latest.json`），安装改为下载完整 Studio（Inno）安装包、SHA-256 校验后退出控制台覆盖安装；不再使用 Tauri NSIS 更新包（此前会装到不同目录且缺少网关运行时，导致反复提示更新、网关无法停止/管理）。
+- 版本号显示优先读安装目录 `VERSION`，缺失时回退编译期版本；新增 `scripts/sync-versions.ps1`，构建时从根 `VERSION` 同步 `tauri.conf.json` 与 `Cargo.toml`。
+- 停止网关增加端口兜底：按 4000 端口监听者 + `run_gateway.py` 命令行身份识别并结束进程树，可清理其他安装目录残留的网关实例。
+
 ## 1.4.1 - 2026-07-19
 
 - 修复安装版启动网关即退：`run_gateway.py` 现在显式把脚本目录加入 `sys.path`，不再依赖嵌入式 Python `._pth` 的搜索路径。

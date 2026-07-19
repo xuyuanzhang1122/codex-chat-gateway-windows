@@ -1,6 +1,7 @@
 mod gateway;
 mod models;
 mod paths;
+mod updater;
 
 use gateway::{
     open_logs_folder, project_root_string, read_version, run_project_script, set_autostart,
@@ -488,6 +489,7 @@ pub fn run() {
             show_main_window,
             hide_main_window,
             quit_console,
+            updater::download_studio_installer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

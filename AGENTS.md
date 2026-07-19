@@ -15,8 +15,8 @@
 - 新桌面控制台优先维护 `desktop-tauri/`（Tauri 2 + React）；网关仍只监听 `127.0.0.1`，密钥不得写入前端静态资源或客户端配置。
 - 旧版 WPF（`desktop/GatewayDesktop.cs` / `CodexChatGateway.exe`）在 Tauri 版稳定前可并存，勿在未确认分发策略前删除。
 - Studio 安装包由 `scripts/build-tauri-installer.ps1` 构建；关闭控制台不得默认杀掉网关进程。
-- 自动更新仅允许 HTTPS GitHub Release 通道（`latest.json` + 签名 NSIS 包）；公钥可进仓库，**私钥不得提交**（用 `TAURI_SIGNING_PRIVATE_KEY` / `_PATH`）。
+- 应用内更新：检测走 HTTPS GitHub Release（`latest.json`）；安装时下载完整 Studio（Inno）安装包、校验 SHA-256 后退出控制台覆盖安装。不得改用 Tauri NSIS 更新包做安装（只含裸控制台且安装目录不同，会造成残缺安装）。updater 签名公钥可进仓库，**私钥不得提交**（用 `TAURI_SIGNING_PRIVATE_KEY` / `_PATH`）。
 - 更新不得改写 `.gateway/models.json` 或日志中的密钥；更新控制台不得默认杀掉网关进程。
-- 发版流程：先更新 `VERSION` 并在 `CHANGELOG.md` 写好对应版本段落，再推送 `v*.*.*` tag 触发 `.github/workflows/release.yml`；tag 必须与 `VERSION` 完全一致。
+- 发版流程：先更新 `VERSION` 并在 `CHANGELOG.md` 写好对应版本段落，再推送 `v*.*.*` tag 触发 `.github/workflows/release.yml`；tag 必须与 `VERSION` 完全一致。版本号以根目录 `VERSION` 为唯一来源，`scripts/sync-versions.ps1` 会在构建时同步 `tauri.conf.json` 与 `Cargo.toml`，不得手工只改其中一处。
 - Release notes 由 `scripts/release-notes.ps1` 从 `CHANGELOG.md` 自动提取；Studio 与 legacy 两个构建 job 并行，任一方先到都要能在 Release 缺失时创建它，不得依赖 job 完成顺序。
 - 构建/发布脚本必须兼容 Windows PowerShell 5.1：纯 ASCII，不依赖模块自动加载（如 `Get-FileHash`），哈希等基础能力直接用 .NET 实现。
