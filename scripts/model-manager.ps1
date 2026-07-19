@@ -83,7 +83,7 @@ function Add-Profile {
     $profile = [pscustomobject]@{ id = $id; name = $name; base_url = $baseUrl; api_key = $apiKey; model_id = $modelId; litellm_model = $litellmModel; routing_enabled = $true; routing_weight = 1 }
     $profiles = @($store.profiles) + @($profile)
     $defaultId = if ($store.default_id) { $store.default_id } else { $id }
-    $store.version = 2
+    $store.version = 3
     $store.default_id = $defaultId
     $store.profiles = $profiles
     Save-ModelStore -ProjectRoot $projectRoot -Store $store
@@ -99,7 +99,7 @@ function Delete-Profile {
     $profiles = @($store.profiles | Where-Object { $_.id -ne $profile.id })
     $defaultId = $store.default_id
     if ($defaultId -eq $profile.id) { $defaultId = if ($profiles.Count -gt 0) { $profiles[0].id } else { '' } }
-    $store.version = 2
+    $store.version = 3
     $store.default_id = $defaultId
     $store.profiles = $profiles
     Save-ModelStore -ProjectRoot $projectRoot -Store $store

@@ -8,7 +8,8 @@ use gateway::{
 };
 use models::{
     add_profile, delete_profile, fetch_remote_models, import_profiles, parse_api_text, read_store,
-    set_default, set_routing, update_profile, ModelInput, ModelStore, ParsedApiText,
+    set_default, set_model_routing, set_profile_routing, update_profile, ModelInput, ModelStore,
+    ParsedApiText,
 };
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -88,12 +89,23 @@ fn make_default(state: State<'_, AppState>, id: String) -> Result<ModelStore, St
 }
 
 #[tauri::command]
-fn configure_routing(
+fn configure_model_routing(
     state: State<'_, AppState>,
+    model_id: String,
     enabled: bool,
-    affinity_ttl_seconds: u64,
 ) -> Result<ModelStore, String> {
-    let store = set_routing(enabled, affinity_ttl_seconds)?;
+    let store = set_model_routing(&model_id, enabled)?;
+    state.gateway.invalidate_models(&store);
+    Ok(store)
+}
+
+#[tauri::command]
+fn configure_profile_routing(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<ModelStore, String> {
+    let store = set_profile_routing(&id, enabled)?;
     state.gateway.invalidate_models(&store);
     Ok(store)
 }
@@ -419,7 +431,8 @@ pub fn run() {
             edit_model,
             remove_model,
             make_default,
-            configure_routing,
+            configure_model_routing,
+            configure_profile_routing,
             fetch_models,
             parse_model_text,
             parse_model_file,

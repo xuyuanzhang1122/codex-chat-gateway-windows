@@ -147,10 +147,10 @@ function App() {
   const [page, setPage] = useState<Page>("gateway");
   const [status, setStatus] = useState<GatewayStatus>(emptyStatus);
   const [store, setStore] = useState<ModelStore>({
-    version: 2,
+    version: 3,
     default_id: "",
     profiles: [],
-    routing: { enabled: false, affinity_ttl_seconds: 3600 },
+    routing: { enabled: false, affinity_ttl_seconds: 3600, model_rules: [] },
   });
   const [info, setInfo] = useState<ProjectInfo | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -359,7 +359,8 @@ function App() {
     const touched =
       (editId && editId === store.default_id) ||
       (!editId && next.profiles.length === 1) ||
-      (store.routing.enabled && (wasRouted || !!updated && isProfileInRoutingPool(next, updated)));
+      wasRouted ||
+      (!!updated && isProfileInRoutingPool(next, updated));
     if (live && touched) {
       const yes = await confirm({
         title: "重启网关",
@@ -371,6 +372,68 @@ function App() {
         beginAction("restart", "正在重启网关…");
         void api.restart();
       }
+    }
+  };
+
+  const restartAfterRoutingChange = async (message: string, affectsRunningModel: boolean) => {
+    if (!live || !affectsRunningModel) return;
+    const yes = await confirm({
+      title: "重启网关",
+      content: message,
+      okText: "立即重启",
+      cancelText: "稍后",
+    });
+    if (yes) {
+      beginAction("restart", "正在重启网关…");
+      void api.restart();
+    }
+  };
+
+  const changeModelRouting = async (modelId: string, enabled: boolean) => {
+    beginAction("routing", enabled ? `正在开启 ${modelId} 分流…` : `正在关闭 ${modelId} 分流…`);
+    try {
+      const next = await api.configureModelRouting(modelId, enabled);
+      setStore(next);
+      showFeedback({
+        key: "routing",
+        state: "ok",
+        message: enabled ? `${modelId} 分流已开启` : `${modelId} 分流已关闭`,
+      });
+      pendingKey.current = null;
+      pushLog("OK", enabled ? `已开启 ${modelId} 多账号分流` : `已关闭 ${modelId} 分流`);
+      await restartAfterRoutingChange(
+        "当前运行模型的分流设置已变更，重启后生效。是否立即重启？",
+        isDefaultModelId(store, modelId),
+      );
+    } catch (e) {
+      showFeedback({ key: "routing", state: "err", message: String(e) });
+      pendingKey.current = null;
+      pushLog("ERR", String(e));
+    }
+  };
+
+  const changeProfileRouting = async (id: string, enabled: boolean) => {
+    const profile = store.profiles.find((item) => item.id === id);
+    if (!profile) return;
+    beginAction("routing", enabled ? `正在启用 ${profile.name}…` : `正在停用 ${profile.name}…`);
+    try {
+      const next = await api.configureProfileRouting(id, enabled);
+      setStore(next);
+      showFeedback({
+        key: "routing",
+        state: "ok",
+        message: enabled ? `已启用上游 ${profile.name}` : `已停用上游 ${profile.name}`,
+      });
+      pendingKey.current = null;
+      pushLog("OK", enabled ? `分流上游已启用 · ${profile.name}` : `分流上游已停用 · ${profile.name}`);
+      await restartAfterRoutingChange(
+        "当前运行模型的上游绑定已变更，重启后生效。是否立即重启？",
+        isDefaultModelId(store, profile.model_id) && isModelRoutingEnabled(store, profile.model_id),
+      );
+    } catch (e) {
+      showFeedback({ key: "routing", state: "err", message: String(e) });
+      pendingKey.current = null;
+      pushLog("ERR", String(e));
     }
   };
 
@@ -556,7 +619,7 @@ function App() {
                             "OK",
                             `已从文本导入 ${models.length} 个模型 · ${parsed.base_url}`,
                           );
-                          if (live && store.routing.enabled && addedToRoutingPool) {
+                          if (live && addedToRoutingPool) {
                             const yes = await confirm({
                               title: "重启网关",
                               content: "导入内容新增了当前模型的分流账号。是否立即重启网关？",
@@ -579,41 +642,12 @@ function App() {
                         }
                       })();
                     }}
-                    onRoutingChange={(enabled) => {
-                      void (async () => {
-                        beginAction("routing", enabled ? "正在开启模型分流…" : "正在关闭模型分流…");
-                        try {
-                          const next = await api.configureRouting(
-                            enabled,
-                            store.routing.affinity_ttl_seconds || 3600,
-                          );
-                          setStore(next);
-                          showFeedback({
-                            key: "routing",
-                            state: "ok",
-                            message: enabled ? "模型分流已开启" : "模型分流已关闭",
-                          });
-                          pendingKey.current = null;
-                          pushLog("OK", enabled ? "已开启同模型多账号分流" : "已关闭模型分流");
-                          if (live) {
-                            const yes = await confirm({
-                              title: "重启网关",
-                              content: "分流设置已变更，重启后生效。是否立即重启？",
-                              okText: "立即重启",
-                              cancelText: "稍后",
-                            });
-                            if (yes) {
-                              beginAction("restart", "正在重启网关…");
-                              void api.restart();
-                            }
-                          }
-                        } catch (e) {
-                          showFeedback({ key: "routing", state: "err", message: String(e) });
-                          pendingKey.current = null;
-                          pushLog("ERR", String(e));
-                        }
-                      })();
-                    }}
+                    onModelRoutingChange={(modelId, enabled) =>
+                      void changeModelRouting(modelId, enabled)
+                    }
+                    onProfileRoutingChange={(id, enabled) =>
+                      void changeProfileRouting(id, enabled)
+                    }
                     onEdit={() => {
                       const id =
                         selectedId || store.default_id || store.profiles[0]?.id || null;
@@ -1291,11 +1325,36 @@ function normalizedModelId(value: string) {
     : normalized;
 }
 
-function isProfileInRoutingPool(store: ModelStore, profile: ModelProfile) {
-  if (!store.routing.enabled || !profile.routing_enabled) return false;
+function isDefaultModelId(store: ModelStore, modelId: string) {
   const current =
     store.profiles.find((item) => item.id === store.default_id) ?? store.profiles[0];
-  return !!current && normalizedModelId(profile.model_id) === normalizedModelId(current.model_id);
+  return !!current && normalizedModelId(current.model_id) === normalizedModelId(modelId);
+}
+
+function isModelRoutingEnabled(store: ModelStore, modelId: string) {
+  const rules = store.routing.model_rules ?? [];
+  if (rules.length === 0) {
+    return store.routing.enabled && isDefaultModelId(store, modelId);
+  }
+  return !!rules.find(
+    (rule) => normalizedModelId(rule.model_id) === normalizedModelId(modelId),
+  )?.enabled;
+}
+
+function isProfileInRoutingPool(store: ModelStore, profile: ModelProfile) {
+  return (
+    profile.routing_enabled &&
+    isDefaultModelId(store, profile.model_id) &&
+    isModelRoutingEnabled(store, profile.model_id)
+  );
+}
+
+function upstreamHost(baseUrl: string) {
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl;
+  }
 }
 
 function ModelsView({
@@ -1306,7 +1365,8 @@ function ModelsView({
   onSelect,
   onAdd,
   onImport,
-  onRoutingChange,
+  onModelRoutingChange,
+  onProfileRoutingChange,
   onEdit,
   onDefault,
   onDelete,
@@ -1319,7 +1379,8 @@ function ModelsView({
   onSelect: (id: string) => void;
   onAdd: () => void;
   onImport: () => void;
-  onRoutingChange: (enabled: boolean) => void;
+  onModelRoutingChange: (modelId: string, enabled: boolean) => void;
+  onProfileRoutingChange: (id: string, enabled: boolean) => void;
   onEdit: () => void;
   onDefault: () => void;
   onDelete: () => void;
@@ -1328,15 +1389,25 @@ function ModelsView({
   const activeId = selectedId || store.default_id || store.profiles[0]?.id || null;
   const activeIsDefault = !!activeId && activeId === store.default_id;
   const onlyOne = store.profiles.length === 1;
-  const defaultProfile =
-    store.profiles.find((p) => p.id === store.default_id) ?? store.profiles[0];
-  const routingCount = defaultProfile
-    ? store.profiles.filter(
-        (p) =>
-          p.routing_enabled &&
-          normalizedModelId(p.model_id) === normalizedModelId(defaultProfile.model_id),
-      ).length
-    : 0;
+  const modelGroups = useMemo(() => {
+    const grouped = new Map<string, { modelId: string; profiles: ModelProfile[] }>();
+    for (const profile of store.profiles) {
+      const key = normalizedModelId(profile.model_id);
+      const group = grouped.get(key) ?? { modelId: profile.model_id, profiles: [] };
+      group.profiles.push(profile);
+      grouped.set(key, group);
+    }
+    return [...grouped.entries()]
+      .map(([key, group]) => ({ key, ...group }))
+      .sort((a, b) => {
+        const aDefault = isDefaultModelId(store, a.modelId) ? 1 : 0;
+        const bDefault = isDefaultModelId(store, b.modelId) ? 1 : 0;
+        return bDefault - aDefault || b.profiles.length - a.profiles.length || a.modelId.localeCompare(b.modelId);
+      });
+  }, [store]);
+  const enabledModelCount = modelGroups.filter((group) =>
+    isModelRoutingEnabled(store, group.modelId),
+  ).length;
 
   return (
     <Flexbox gap={14} style={{ height: "100%" }}>
@@ -1356,27 +1427,94 @@ function ModelsView({
       </Flexbox>
 
       {store.profiles.length > 0 && (
-        <Block variant="outlined" padding={14}>
-          <Flexbox horizontal distribution="space-between" align="center" gap={16}>
-            <Flexbox gap={4}>
-              <Text weight={700}>同模型多账号分流</Text>
+        <section className="routing-console">
+          <Flexbox horizontal distribution="space-between" align="flex-end" gap={16}>
+            <Flexbox gap={3}>
+              <Text weight={800}>分流模型管理</Text>
               <Text type="secondary" fontSize={12}>
-                当前默认模型 {defaultProfile?.model_id} · {routingCount} 个账号参与 · 会话亲和约 {Math.round((store.routing.affinity_ttl_seconds || 3600) / 60)} 分钟
+                按模型绑定上游；新会话按权重分配，已有会话保持亲和约 {Math.round((store.routing.affinity_ttl_seconds || 3600) / 60)} 分钟
               </Text>
-              {store.routing.enabled && routingCount < 2 && (
-                <Text type="warning" fontSize={11}>
-                  当前只有 1 个可用账号；再添加同模型账号后才会产生额度分流。
-                </Text>
-              )}
             </Flexbox>
-            <Switch
-              checked={store.routing.enabled}
-              loading={isLoading(feedback, "routing")}
-              disabled={busy}
-              onChange={onRoutingChange}
-            />
+            <Tag color={enabledModelCount > 0 ? "success" : "default"}>
+              {enabledModelCount} / {modelGroups.length} 已开启
+            </Tag>
           </Flexbox>
-        </Block>
+
+          <div className="routing-groups">
+            {modelGroups.map((group) => {
+              const groupEnabled = isModelRoutingEnabled(store, group.modelId);
+              const enabledProfiles = group.profiles.filter((profile) => profile.routing_enabled);
+              const defaultGroup = isDefaultModelId(store, group.modelId);
+              return (
+                <Block
+                  key={group.key}
+                  className={`routing-group${groupEnabled ? " is-enabled" : ""}${defaultGroup ? " is-default" : ""}`}
+                  variant="outlined"
+                  padding={0}
+                >
+                  <div className="routing-group-head">
+                    <Flexbox gap={4} style={{ minWidth: 0 }}>
+                      <Flexbox horizontal gap={7} align="center" style={{ minWidth: 0 }}>
+                        <span className="routing-status-dot" />
+                        <Text weight={800} ellipsis>{group.modelId}</Text>
+                        {defaultGroup && <Tag color="success">当前默认</Tag>}
+                      </Flexbox>
+                      <Text type="secondary" fontSize={11}>
+                        {group.profiles.length} 个上游 · {enabledProfiles.length} 个已选择
+                      </Text>
+                    </Flexbox>
+                    <Flexbox horizontal gap={10} align="center">
+                      <Text type="secondary" fontSize={11}>
+                        {groupEnabled ? "模型分流已开启" : "模型分流已关闭"}
+                      </Text>
+                      <Switch
+                        checked={groupEnabled}
+                        loading={isLoading(feedback, "routing")}
+                        disabled={busy}
+                        onChange={(enabled) => onModelRoutingChange(group.modelId, enabled)}
+                      />
+                    </Flexbox>
+                  </div>
+
+                  <div className="routing-upstreams">
+                    {group.profiles.map((profile) => {
+                      const isDefault = profile.id === store.default_id;
+                      return (
+                        <div className="routing-upstream" key={profile.id}>
+                          <span className={`upstream-rail${profile.routing_enabled ? " is-on" : ""}`} />
+                          <Flexbox gap={2} style={{ minWidth: 0, flex: 1 }}>
+                            <Flexbox horizontal gap={6} align="center" style={{ minWidth: 0 }}>
+                              <Text weight={700} fontSize={12} ellipsis>{profile.name}</Text>
+                              {isDefault && <Tag>默认上游</Tag>}
+                            </Flexbox>
+                            <Text type="secondary" fontSize={10.5} ellipsis>
+                              {upstreamHost(profile.base_url)}
+                            </Text>
+                          </Flexbox>
+                          <Tag color={profile.routing_enabled ? "blue" : "default"}>
+                            权重 × {profile.routing_weight}
+                          </Tag>
+                          <Switch
+                            size="small"
+                            checked={profile.routing_enabled}
+                            disabled={busy}
+                            onChange={(enabled) => onProfileRoutingChange(profile.id, enabled)}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {groupEnabled && enabledProfiles.length < 2 && (
+                    <div className="routing-group-note">
+                      当前只有 {enabledProfiles.length} 个上游启用；至少启用 2 个才会产生实际分流。
+                    </div>
+                  )}
+                </Block>
+              );
+            })}
+          </div>
+        </section>
       )}
 
       {store.profiles.length === 0 ? (
@@ -1405,6 +1543,10 @@ function ModelsView({
         </>
       ) : (
         <>
+          <Flexbox horizontal distribution="space-between" align="center">
+            <Text weight={700}>上游配置</Text>
+            <Text type="secondary" fontSize={11}>双击卡片可编辑地址、密钥与权重</Text>
+          </Flexbox>
           <Flexbox gap={10} horizontal style={{ flexWrap: "wrap" }}>
             {store.profiles.map((p) => {
               const isDefault = p.id === store.default_id;
@@ -1436,8 +1578,12 @@ function ModelsView({
                       {p.base_url}
                     </Text>
                     <Flexbox horizontal gap={6} align="center">
-                      <Tag color={p.routing_enabled ? "blue" : "default"}>
-                        {p.routing_enabled ? `分流 × ${p.routing_weight}` : "不参与分流"}
+                      <Tag color={p.routing_enabled && isModelRoutingEnabled(store, p.model_id) ? "blue" : "default"}>
+                        {!p.routing_enabled
+                          ? "上游已停用"
+                          : isModelRoutingEnabled(store, p.model_id)
+                            ? `分流 × ${p.routing_weight}`
+                            : `候选 × ${p.routing_weight}`}
                       </Tag>
                     </Flexbox>
                   </Flexbox>
@@ -1937,7 +2083,7 @@ function ModelDialog({
           <FormItem label="同模型分流">
             <Flexbox horizontal distribution="space-between" align="center" gap={12}>
               <Flexbox gap={2}>
-                <Text fontSize={12}>参与当前默认模型的多账号路由</Text>
+                <Text fontSize={12}>作为该模型的可选分流上游</Text>
                 <Text type="secondary" fontSize={11}>
                   同一会话会优先保持在同一家，故障时才切换。
                 </Text>

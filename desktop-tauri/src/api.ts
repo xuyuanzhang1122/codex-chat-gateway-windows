@@ -17,8 +17,10 @@ export const api = {
     invoke<ModelStore>("edit_model", { id, input }),
   removeModel: (id: string) => invoke<ModelStore>("remove_model", { id }),
   makeDefault: (id: string) => invoke<ModelStore>("make_default", { id }),
-  configureRouting: (enabled: boolean, affinityTtlSeconds: number) =>
-    invoke<ModelStore>("configure_routing", { enabled, affinityTtlSeconds }),
+  configureModelRouting: (modelId: string, enabled: boolean) =>
+    invoke<ModelStore>("configure_model_routing", { modelId, enabled }),
+  configureProfileRouting: (id: string, enabled: boolean) =>
+    invoke<ModelStore>("configure_profile_routing", { id, enabled }),
   fetchModels: (baseUrl: string, apiKey: string) =>
     invoke<string[]>("fetch_models", { baseUrl, apiKey }),
   parseModelText: (text: string) => invoke<ParsedApiText>("parse_model_text", { text }),

@@ -38,6 +38,22 @@ def _claude_litellm_model(value: str) -> str:
     return value
 
 
+def _model_routing_enabled(routing: dict[str, Any], model_id: str) -> bool:
+    rules = routing.get("model_rules") or []
+    if rules:
+        normalized = _normalized_model_id(model_id)
+        rule = next(
+            (
+                item
+                for item in rules
+                if _normalized_model_id(str(item.get("model_id") or "")) == normalized
+            ),
+            None,
+        )
+        return bool(rule and rule.get("enabled", False))
+    return bool(routing.get("enabled", False))
+
+
 def _read_routing_pool() -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
     if not MODELS_PATH.exists():
         return None
@@ -48,9 +64,6 @@ def _read_routing_pool() -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
         store = json.load(handle)
 
     routing = store.get("routing") or {}
-    if not routing.get("enabled", False):
-        return None
-
     profiles = store.get("profiles") or []
     if not profiles:
         return None
@@ -58,6 +71,8 @@ def _read_routing_pool() -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
     default_id = store.get("default_id") or ""
     default = next((item for item in profiles if item.get("id") == default_id), profiles[0])
     target_model = _normalized_model_id(str(default.get("model_id") or ""))
+    if not _model_routing_enabled(routing, target_model):
+        return None
     pool = [
         item
         for item in profiles

@@ -100,6 +100,25 @@ def main() -> None:
             result = gateway_runtime._read_routing_pool()
             assert result is not None
             assert [item["id"] for item in result[1]] == ["account-a", "account-b"]
+
+            models_path.write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "default_id": "account-a",
+                        "profiles": [first, second],
+                        "routing": {
+                            "enabled": True,
+                            "affinity_ttl_seconds": 3600,
+                            "model_rules": [
+                                {"model_id": "gpt-5.6-sol", "enabled": False}
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            assert gateway_runtime._read_routing_pool() is None
         finally:
             gateway_runtime.MODELS_PATH = old_path
 

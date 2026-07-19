@@ -116,7 +116,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Anthropic gateway regression test failed.' }
 & $portablePython (Join-Path $projectRoot 'tests\test_gateway_routing.py')
 if ($LASTEXITCODE -ne 0) { throw 'Multi-account routing regression test failed.' }
 & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $projectRoot 'tests\test_model_store_v2.ps1')
-if ($LASTEXITCODE -ne 0) { throw 'Model store v2 regression test failed.' }
+if ($LASTEXITCODE -ne 0) { throw 'Model store v3 migration regression test failed.' }
 
 foreach ($file in Get-ChildItem -LiteralPath $stageScripts -Filter '*.ps1') {
     [void][scriptblock]::Create((Get-Content -LiteralPath $file.FullName -Raw))

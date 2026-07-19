@@ -12,6 +12,12 @@ export interface ModelProfile {
 export interface RoutingSettings {
   enabled: boolean;
   affinity_ttl_seconds: number;
+  model_rules: ModelRoutingRule[];
+}
+
+export interface ModelRoutingRule {
+  model_id: string;
+  enabled: boolean;
 }
 
 export interface ModelStore {

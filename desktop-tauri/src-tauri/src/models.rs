@@ -20,11 +20,21 @@ pub struct ModelProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRoutingRule {
+    pub model_id: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingSettings {
+    /// Legacy v2 aggregate flag. Kept for old clients; v3 routing uses model_rules.
     #[serde(default)]
     pub enabled: bool,
     #[serde(default = "default_affinity_ttl_seconds")]
     pub affinity_ttl_seconds: u64,
+    #[serde(default)]
+    pub model_rules: Vec<ModelRoutingRule>,
 }
 
 impl Default for RoutingSettings {
@@ -32,6 +42,7 @@ impl Default for RoutingSettings {
         Self {
             enabled: false,
             affinity_ttl_seconds: default_affinity_ttl_seconds(),
+            model_rules: Vec::new(),
         }
     }
 }
@@ -48,7 +59,7 @@ pub struct ModelStore {
 impl Default for ModelStore {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             default_id: String::new(),
             profiles: Vec::new(),
             routing: RoutingSettings::default(),
@@ -100,6 +111,27 @@ pub fn claude_litellm_model(litellm_model: &str) -> String {
     litellm_model.to_string()
 }
 
+pub fn normalized_model_id(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    if let Some((provider, rest)) = normalized.split_once('/') {
+        if matches!(provider, "openai" | "custom_openai" | "deepseek") {
+            return rest.to_string();
+        }
+    }
+    normalized
+}
+
+pub fn model_routing_enabled(store: &ModelStore, model_id: &str) -> bool {
+    let normalized = normalized_model_id(model_id);
+    store
+        .routing
+        .model_rules
+        .iter()
+        .find(|rule| normalized_model_id(&rule.model_id) == normalized)
+        .map(|rule| rule.enabled)
+        .unwrap_or(false)
+}
+
 pub fn read_store() -> Result<ModelStore, String> {
     let root = project_root();
     let path = models_path(&root);
@@ -112,15 +144,24 @@ pub fn read_store() -> Result<ModelStore, String> {
     let text = fs::read_to_string(&path).map_err(|e| format!("读取模型配置失败: {e}"))?;
     let mut store: ModelStore =
         serde_json::from_str(&text).map_err(|e| format!("解析 models.json 失败: {e}"))?;
-    store.version = 2;
-    store.routing.affinity_ttl_seconds = store.routing.affinity_ttl_seconds.clamp(300, 86_400);
-    for profile in &mut store.profiles {
-        profile.routing_weight = profile.routing_weight.clamp(1, 100);
-    }
     if store.default_id.is_empty() {
         if let Some(first) = store.profiles.first() {
             store.default_id = first.id.clone();
         }
+    }
+    if store.routing.model_rules.is_empty() && store.routing.enabled {
+        if let Some(default) = default_profile(&store) {
+            store.routing.model_rules.push(ModelRoutingRule {
+                model_id: default.model_id.clone(),
+                enabled: true,
+            });
+        }
+    }
+    store.version = 3;
+    store.routing.affinity_ttl_seconds = store.routing.affinity_ttl_seconds.clamp(300, 86_400);
+    store.routing.enabled = store.routing.model_rules.iter().any(|rule| rule.enabled);
+    for profile in &mut store.profiles {
+        profile.routing_weight = profile.routing_weight.clamp(1, 100);
     }
     Ok(store)
 }
@@ -192,7 +233,7 @@ fn import_legacy_env(root: &Path) -> Result<Option<ModelStore>, String> {
         routing_weight: default_routing_weight(),
     };
     let store = ModelStore {
-        version: 2,
+        version: 3,
         default_id: id,
         profiles: vec![profile],
         routing: RoutingSettings::default(),
@@ -254,6 +295,11 @@ pub fn update_profile(id: &str, input: ModelInput) -> Result<ModelStore, String>
 
 pub fn delete_profile(id: &str) -> Result<ModelStore, String> {
     let mut store = read_store()?;
+    let removed_model = store
+        .profiles
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| normalized_model_id(&p.model_id));
     store.profiles.retain(|p| p.id != id);
     if store.default_id == id {
         store.default_id = store
@@ -261,6 +307,19 @@ pub fn delete_profile(id: &str) -> Result<ModelStore, String> {
             .first()
             .map(|p| p.id.clone())
             .unwrap_or_default();
+    }
+    if let Some(removed_model) = removed_model {
+        if !store
+            .profiles
+            .iter()
+            .any(|profile| normalized_model_id(&profile.model_id) == removed_model)
+        {
+            store
+                .routing
+                .model_rules
+                .retain(|rule| normalized_model_id(&rule.model_id) != removed_model);
+            store.routing.enabled = store.routing.model_rules.iter().any(|rule| rule.enabled);
+        }
     }
     save_store(&store)?;
     Ok(store)
@@ -276,10 +335,63 @@ pub fn set_default(id: &str) -> Result<ModelStore, String> {
     Ok(store)
 }
 
-pub fn set_routing(enabled: bool, affinity_ttl_seconds: u64) -> Result<ModelStore, String> {
+pub fn set_model_routing(model_id: &str, enabled: bool) -> Result<ModelStore, String> {
     let mut store = read_store()?;
-    store.routing.enabled = enabled;
-    store.routing.affinity_ttl_seconds = affinity_ttl_seconds.clamp(300, 86_400);
+    let normalized = normalized_model_id(model_id);
+    if !store
+        .profiles
+        .iter()
+        .any(|profile| normalized_model_id(&profile.model_id) == normalized)
+    {
+        return Err("未找到该模型的上游配置".into());
+    }
+    if enabled
+        && !store.profiles.iter().any(|profile| {
+            normalized_model_id(&profile.model_id) == normalized && profile.routing_enabled
+        })
+    {
+        return Err("请先为该模型启用至少一个上游".into());
+    }
+    if let Some(rule) = store
+        .routing
+        .model_rules
+        .iter_mut()
+        .find(|rule| normalized_model_id(&rule.model_id) == normalized)
+    {
+        rule.enabled = enabled;
+    } else {
+        store.routing.model_rules.push(ModelRoutingRule {
+            model_id: model_id.trim().to_string(),
+            enabled,
+        });
+    }
+    store.routing.enabled = store.routing.model_rules.iter().any(|rule| rule.enabled);
+    save_store(&store)?;
+    Ok(store)
+}
+
+pub fn set_profile_routing(id: &str, enabled: bool) -> Result<ModelStore, String> {
+    let mut store = read_store()?;
+    let Some(profile) = store.profiles.iter().find(|profile| profile.id == id) else {
+        return Err("未找到该上游配置".into());
+    };
+    let model_id = profile.model_id.clone();
+    if !enabled && model_routing_enabled(&store, &model_id) {
+        let enabled_count = store
+            .profiles
+            .iter()
+            .filter(|item| {
+                normalized_model_id(&item.model_id) == normalized_model_id(&model_id)
+                    && item.routing_enabled
+            })
+            .count();
+        if enabled_count <= 1 {
+            return Err("该模型分流已开启，至少需要保留一个上游".into());
+        }
+    }
+    if let Some(profile) = store.profiles.iter_mut().find(|profile| profile.id == id) {
+        profile.routing_enabled = enabled;
+    }
     save_store(&store)?;
     Ok(store)
 }
@@ -596,5 +708,23 @@ mod tests {
         let p = parse_api_text(text).unwrap();
         assert!(p.models.is_empty());
         assert!(p.model_missing);
+    }
+
+    #[test]
+    fn model_routing_rules_are_independent() {
+        let mut store = ModelStore::default();
+        store.routing.model_rules = vec![
+            ModelRoutingRule {
+                model_id: "openai/gpt-a".into(),
+                enabled: true,
+            },
+            ModelRoutingRule {
+                model_id: "gpt-b".into(),
+                enabled: false,
+            },
+        ];
+        assert!(model_routing_enabled(&store, "gpt-a"));
+        assert!(!model_routing_enabled(&store, "custom_openai/gpt-b"));
+        assert!(!model_routing_enabled(&store, "gpt-c"));
     }
 }

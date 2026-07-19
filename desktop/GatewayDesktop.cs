@@ -461,6 +461,13 @@ namespace CodexChatGateway.Desktop
     {
         public bool enabled { get; set; }
         public int affinity_ttl_seconds { get; set; }
+        public List<ModelRoutingRule> model_rules { get; set; }
+    }
+
+    internal sealed class ModelRoutingRule
+    {
+        public string model_id { get; set; }
+        public bool enabled { get; set; }
     }
 
     internal sealed class ModelProfile
@@ -536,10 +543,10 @@ namespace CodexChatGateway.Desktop
         {
             return new ModelStore
             {
-                version = 2,
+                version = 3,
                 default_id = "",
                 profiles = new List<ModelProfile>(),
-                routing = new RoutingSettings { enabled = false, affinity_ttl_seconds = 3600 }
+                routing = new RoutingSettings { enabled = false, affinity_ttl_seconds = 3600, model_rules = new List<ModelRoutingRule>() }
             };
         }
 
@@ -556,15 +563,25 @@ namespace CodexChatGateway.Desktop
 
         private static void NormalizeStore(ModelStore store)
         {
-            store.version = 2;
+            store.version = 3;
             if (store.profiles == null) store.profiles = new List<ModelProfile>();
             if (store.routing == null)
-                store.routing = new RoutingSettings { enabled = false, affinity_ttl_seconds = 3600 };
+                store.routing = new RoutingSettings { enabled = false, affinity_ttl_seconds = 3600, model_rules = new List<ModelRoutingRule>() };
             if (store.routing.affinity_ttl_seconds <= 0) store.routing.affinity_ttl_seconds = 3600;
             foreach (ModelProfile profile in store.profiles)
             {
                 if (!profile.routing_enabled.HasValue) profile.routing_enabled = true;
                 if (profile.routing_weight <= 0) profile.routing_weight = 1;
+            }
+            if (store.routing.model_rules == null)
+            {
+                store.routing.model_rules = new List<ModelRoutingRule>();
+                if (store.routing.enabled)
+                {
+                    ModelProfile current = store.profiles.FirstOrDefault(p => p.id == store.default_id);
+                    if (current != null)
+                        store.routing.model_rules.Add(new ModelRoutingRule { model_id = current.model_id, enabled = true });
+                }
             }
         }
 

@@ -10,17 +10,17 @@ function Read-ModelStore {
     $path = Get-ModelStorePath $ProjectRoot
     if (-not (Test-Path -LiteralPath $path)) {
         return [pscustomobject]@{
-            version = 2
+            version = 3
             default_id = ''
             profiles = @()
-            routing = [pscustomobject]@{ enabled = $false; affinity_ttl_seconds = 3600 }
+            routing = [pscustomobject]@{ enabled = $false; affinity_ttl_seconds = 3600; model_rules = @() }
         }
     }
     $store = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $store.profiles) { $store.profiles = @() }
-    $store | Add-Member -NotePropertyName version -NotePropertyValue 2 -Force
+    $store | Add-Member -NotePropertyName version -NotePropertyValue 3 -Force
     if (-not $store.routing) {
-        $store | Add-Member -NotePropertyName routing -NotePropertyValue ([pscustomobject]@{ enabled = $false; affinity_ttl_seconds = 3600 }) -Force
+        $store | Add-Member -NotePropertyName routing -NotePropertyValue ([pscustomobject]@{ enabled = $false; affinity_ttl_seconds = 3600; model_rules = @() }) -Force
     } elseif (-not $store.routing.affinity_ttl_seconds) {
         $store.routing | Add-Member -NotePropertyName affinity_ttl_seconds -NotePropertyValue 3600 -Force
     }
@@ -31,6 +31,16 @@ function Read-ModelStore {
         if (-not $profile.routing_weight) {
             $profile | Add-Member -NotePropertyName routing_weight -NotePropertyValue 1 -Force
         }
+    }
+    if ($null -eq $store.routing.model_rules) {
+        $rules = @()
+        if ($store.routing.enabled) {
+            $defaultProfile = @($store.profiles | Where-Object { $_.id -eq $store.default_id }) | Select-Object -First 1
+            if ($defaultProfile) {
+                $rules = @([pscustomobject]@{ model_id = [string]$defaultProfile.model_id; enabled = $true })
+            }
+        }
+        $store.routing | Add-Member -NotePropertyName model_rules -NotePropertyValue $rules -Force
     }
     return $store
 }
@@ -87,10 +97,10 @@ function Import-LegacyEnvironment {
         routing_weight = 1
     }
     $store = [pscustomobject]@{
-        version = 2
+        version = 3
         default_id = $id
         profiles = @($profile)
-        routing = [pscustomobject]@{ enabled = $false; affinity_ttl_seconds = 3600 }
+        routing = [pscustomobject]@{ enabled = $false; affinity_ttl_seconds = 3600; model_rules = @() }
     }
     Save-ModelStore -ProjectRoot $ProjectRoot -Store $store
     return $true
