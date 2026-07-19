@@ -5,8 +5,8 @@
 <h1 align="center">Codex Chat Gateway</h1>
 
 <p align="center">
-  Local bridge from third-party Chat Completions APIs to<br>
-  <strong>Codex</strong> (<code>/v1/responses</code>) and <strong>Claude Desktop</strong> Code mode.
+  Use any model you already pay for with <strong>Codex</strong> and <strong>Claude Desktop</strong>.<br>
+  DeepSeek, Kimi, GLM… if it speaks OpenAI-style API, it works — in about three minutes.
 </p>
 
 <p align="center">
@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/latest"><b>Download Studio for Windows</b></a>
+  <a href="https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/latest"><b>⬇ Download Studio for Windows</b></a>
   ·
   <a href="docs/RELEASE_AND_UPDATES.md">Release & updates</a>
   ·
@@ -35,47 +35,37 @@
   <img src="docs/assets/studio-gateway.png" width="920" alt="Studio console">
 </p>
 
-Community tool — **not** an official OpenAI product.  
-The gateway always binds to `127.0.0.1`. Keys stay on your machine.
+## What is this
 
-## Why
+Codex speaks the Responses API. Claude Desktop's Code mode speaks Anthropic Messages. Most third-party models only offer OpenAI-style Chat Completions — so good models sit unused because the protocols don't line up.
 
-Codex talks Responses API. Claude Desktop Code mode talks Anthropic Messages. Most providers only expose OpenAI-style Chat Completions.
-
-This project runs [LiteLLM](https://github.com/BerriAI/litellm) on `http://127.0.0.1:4000` and ships a Windows Studio console for models, process lifecycle, and client wiring. Protocol conversion is delegated to LiteLLM; we focus on packaging, safe config writes, and a local control surface.
+This little tool builds a bridge on your own machine at `127.0.0.1:4000`: protocol conversion is delegated to the battle-tested [LiteLLM](https://github.com/BerriAI/litellm), and a ready-to-use Windows console manages models, the gateway process, and client wiring for you.
 
 ```text
   Codex ──/v1/responses──┐
-                         ├──► 127.0.0.1:4000 (LiteLLM) ──► DeepSeek / Kimi / OpenAI-compatible
+                         ├──► 127.0.0.1:4000 (LiteLLM) ──► DeepSeek / Kimi / GLM / any OpenAI-compatible API
   Claude Desktop Code ───┘
 ```
 
-## Features
+Two things you can count on: **the gateway only listens on loopback**, so nobody else can reach it; **your API keys never leave your machine** — no logs, no client configs, no uploads.
 
-| | |
-|---|---|
-| **Studio console** | Tauri 2 + React + [LobeHub UI](https://ui.lobehub.com/). Frameless window, tray (close does not kill the gateway). |
-| **Models** | CRUD, default selection, remote `/models` list, import `baseurl` / `key` / `model` text files. |
-| **Clients** | One-click Codex provider write + Claude Desktop 3P Profile (Code mode only). Restore keeps MCP / other profiles. |
-| **Updates** | Signed updates over HTTPS GitHub Releases (`latest.json` + minisign). Does not rewrite `.gateway`. |
-| **Installer** | User-level Studio setup with optional removal of the legacy C# desktop. |
+> Community open-source project — not an official OpenAI product.
 
-## Install
+## Up and running in 3 minutes
 
-1. Grab **`CodexChatGateway-Studio-Setup-v*.exe`** from [Releases](https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/latest).
-2. Open **Codex Chat Gateway**.
-3. **Models** → add a profile (or **Import txt**).
-4. **Gateway** → Start.
-5. **Clients** → configure Codex and/or Claude Desktop, then fully restart those apps.
+1. **Install**: grab `CodexChatGateway-Studio-Setup-v*.exe` from [Releases](https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/latest) and run it.
+2. **Add a model**: open the console → **Models** → fill in `baseurl` / `key` / `model`. Only have a blob of text? **Import txt** parses it for you.
+3. **Start**: **Gateway** → hit Start; green means go.
+4. **Wire clients**: the **Clients** page writes Codex and Claude Desktop configs in one click — then **fully restart** those apps.
 
-Codex should use:
+Once connected, Codex only needs two values:
 
 | | |
 |---|---|
 | Model | `codex-chat` |
 | Base URL | `http://127.0.0.1:4000/v1` |
 
-### Import text format
+### Import text looks like this
 
 ```text
 baseurl：https://api.deepseek.com
@@ -83,10 +73,26 @@ key:sk-xxxxxxxx
 model:deepseek-v4-flash,deepseek-v4-pro
 ```
 
-`model` may be empty; the console will offer an online list fetch.  
-`：` / `:` / `=` and common key aliases (`base_url`, `api_key`, …) are accepted.
+`model` may be empty — the console will offer to fetch the list online. `：` / `:` / `=` and common aliases (`base_url`, `api_key`, …) are all accepted.
 
-## Source layout
+## Features
+
+| | |
+|---|---|
+| **Studio console** | Tauri 2 + React + [LobeHub UI](https://ui.lobehub.com/), frameless dark UI; closing the window just sends it to the tray — **the gateway keeps running**. |
+| **Models** | CRUD, default-model switching, online `/models` fetch, one-click txt import. |
+| **Client wiring** | One-click Codex provider and Claude Desktop Code mode (3P Profile); one-click restore keeps your MCP servers and other profiles untouched. |
+| **Auto-update** | Click "Check for updates" in the console; update packages are minisign-verified and **never touch your `.gateway` config**. |
+| **Installer** | Per-user install (no admin needed), English/Chinese UI, optional login autostart; can remove the legacy C# desktop for you. |
+
+## Run from source
+
+```powershell
+git clone https://github.com/xuyuanzhang1122/codex-chat-gateway-windows.git
+cd codex-chat-gateway-windows\desktop-tauri
+npm install
+npm run tauri dev
+```
 
 | Path | Purpose |
 |------|---------|
@@ -97,51 +103,29 @@ model:deepseek-v4-flash,deepseek-v4-pro
 | `docs/` | Release, portable, structure notes |
 | `examples/` | Sample Codex provider TOML |
 
-Common entry points from a clone:
+## How auto-update works
 
-```powershell
-.\Studio.bat                 # or .\bin\desktop-tauri.bat
-.\bin\start-gateway.bat
-.\bin\build-tauri-installer.ps1   # via 构建Studio安装器.bat
-```
+- **For users**: **Clients → Check for updates** in the console. Startup only probes silently; nothing downloads without your consent.
+- **For publishers**: pushing a `v*.*.*` tag makes GitHub Actions build the installer, sign updater artifacts, and upload them with `latest.json` to the Release. Signatures are verified on the client; the private key never enters the repo. Manual builds: [docs/RELEASE_AND_UPDATES.md](docs/RELEASE_AND_UPDATES.md).
 
-```powershell
-cd desktop-tauri
-npm install
-npm run tauri dev
-```
+## Security boundaries
 
-## Auto-update
+- The listen address is hard-coded to `127.0.0.1` — there is no switch to expose it.
+- Upstream keys live only in process env and `.gateway/models.json`; never in Codex TOML, Claude profiles, logs, or the webview bundle.
+- Every "restore official config" script reverses only this project's own fields.
+- `.env`, `.gateway/`, and updater signing keys are git-ignored — do not commit them.
 
-Users: **Clients → Check for updates**. Startup only logs availability; nothing downloads without consent.
+## Known limits
 
-Publishers sign artifacts with a private key that **never** enters the repo:
-
-```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY_PATH = "$env:USERPROFILE\.codex-chat-gateway\tauri-updater.key"
-.\scripts\build-updater-artifacts.ps1
-```
-
-Upload the updater zip and a root-level **`latest.json`** on the GitHub Release. Details: [docs/RELEASE_AND_UPDATES.md](docs/RELEASE_AND_UPDATES.md).
-
-## Security
-
-- Listen address is fixed to loopback.
-- Upstream keys live in process env / `.gateway/models.json` only — not in Codex TOML, Claude profiles, logs, or the webview bundle.
-- Codex / Claude restore scripts reverse **only** this project's fields.
-- Signing private keys and `.env` / `.gateway` must not be committed.
-
-## Limits
-
-- Upstream models still need solid tool-calling for Codex agent work.
+- Codex agent work leans heavily on tool calling — your upstream model's tool-calling quality defines the experience.
 - Optional params LiteLLM cannot map are dropped.
-- LiteLLM is pinned to a known commit that includes tool-message adjacency fixes (see `CHANGELOG` / requirements).
+- LiteLLM is pinned to a commit that includes tool-message adjacency fixes (see `CHANGELOG` / `requirements.txt`).
 
 ## Credits
 
-- [LiteLLM](https://github.com/BerriAI/litellm) — protocol bridge  
-- [LobeHub UI](https://ui.lobehub.com/) — Studio components  
-- [Tauri](https://tauri.app/) — desktop shell & updater  
+- [LiteLLM](https://github.com/BerriAI/litellm) — protocol bridge
+- [LobeHub UI](https://ui.lobehub.com/) — Studio components
+- [Tauri](https://tauri.app/) — desktop shell & updater
 - Claude Desktop 3P Profile shape cross-checked against [cc-switch](https://github.com/farion1231/cc-switch)
 
 Maintainer: [xuyuanzhang1122](https://github.com/xuyuanzhang1122)

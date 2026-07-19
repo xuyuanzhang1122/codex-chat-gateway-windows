@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.3.0
+
 - **Studio 控制台**（`desktop-tauri/`）：Tauri 2 + React + LobeHub；无边框、托盘关窗不杀网关；去掉多余启动闪屏。
 - Rust `GatewayManager`：进程生命周期、多进程停止（taskkill 树）、事件推送。
 - **Studio 安装器**与 **自动更新**（GitHub `latest.json` + minisign）。
