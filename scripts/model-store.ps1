@@ -9,10 +9,29 @@ function Read-ModelStore {
     param([string]$ProjectRoot)
     $path = Get-ModelStorePath $ProjectRoot
     if (-not (Test-Path -LiteralPath $path)) {
-        return [pscustomobject]@{ version = 1; default_id = ''; profiles = @() }
+        return [pscustomobject]@{
+            version = 2
+            default_id = ''
+            profiles = @()
+            routing = [pscustomobject]@{ enabled = $false; affinity_ttl_seconds = 3600 }
+        }
     }
     $store = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $store.profiles) { $store.profiles = @() }
+    $store | Add-Member -NotePropertyName version -NotePropertyValue 2 -Force
+    if (-not $store.routing) {
+        $store | Add-Member -NotePropertyName routing -NotePropertyValue ([pscustomobject]@{ enabled = $false; affinity_ttl_seconds = 3600 }) -Force
+    } elseif (-not $store.routing.affinity_ttl_seconds) {
+        $store.routing | Add-Member -NotePropertyName affinity_ttl_seconds -NotePropertyValue 3600 -Force
+    }
+    foreach ($profile in @($store.profiles)) {
+        if ($null -eq $profile.routing_enabled) {
+            $profile | Add-Member -NotePropertyName routing_enabled -NotePropertyValue $true -Force
+        }
+        if (-not $profile.routing_weight) {
+            $profile | Add-Member -NotePropertyName routing_weight -NotePropertyValue 1 -Force
+        }
+    }
     return $store
 }
 
@@ -64,8 +83,15 @@ function Import-LegacyEnvironment {
         api_key = $values.UPSTREAM_API_KEY
         model_id = ($values.UPSTREAM_MODEL -replace '^[^/]+/', '')
         litellm_model = $values.UPSTREAM_MODEL
+        routing_enabled = $true
+        routing_weight = 1
     }
-    $store = [pscustomobject]@{ version = 1; default_id = $id; profiles = @($profile) }
+    $store = [pscustomobject]@{
+        version = 2
+        default_id = $id
+        profiles = @($profile)
+        routing = [pscustomobject]@{ enabled = $false; affinity_ttl_seconds = 3600 }
+    }
     Save-ModelStore -ProjectRoot $ProjectRoot -Store $store
     return $true
 }

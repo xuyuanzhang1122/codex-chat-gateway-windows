@@ -6,6 +6,7 @@ codex-chat-gateway/
 ├── VERSION                   Release version (keep in sync with desktop-tauri)
 ├── config.yaml               LiteLLM gateway config
 ├── run_gateway.py            Gateway entry (spawned by Studio / scripts)
+├── gateway_runtime.py         Runtime routing config + cache affinity adapter
 ├── requirements.txt
 ├── Studio.bat                Thin alias → bin/desktop-tauri.bat
 ├── bin/                      User-facing launchers (EN + ZH)

@@ -8,7 +8,7 @@ use gateway::{
 };
 use models::{
     add_profile, delete_profile, fetch_remote_models, import_profiles, parse_api_text, read_store,
-    set_default, update_profile, ModelInput, ModelStore, ParsedApiText,
+    set_default, set_routing, update_profile, ModelInput, ModelStore, ParsedApiText,
 };
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -88,6 +88,17 @@ fn make_default(state: State<'_, AppState>, id: String) -> Result<ModelStore, St
 }
 
 #[tauri::command]
+fn configure_routing(
+    state: State<'_, AppState>,
+    enabled: bool,
+    affinity_ttl_seconds: u64,
+) -> Result<ModelStore, String> {
+    let store = set_routing(enabled, affinity_ttl_seconds)?;
+    state.gateway.invalidate_models(&store);
+    Ok(store)
+}
+
+#[tauri::command]
 fn fetch_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
     fetch_remote_models(&base_url, &api_key)
 }
@@ -148,7 +159,11 @@ fn toggle_autostart(enable: bool) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn run_script(app: AppHandle, state: State<'_, AppState>, name: String) -> Result<ActionResult, String> {
+fn run_script(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<ActionResult, String> {
     const ALLOWED: &[&str] = &[
         "configure-codex.ps1",
         "restore-codex.ps1",
@@ -168,7 +183,11 @@ fn run_script(app: AppHandle, state: State<'_, AppState>, name: String) -> Resul
         let _ = app.emit(
             "gateway://log",
             gateway::LogEvent {
-                level: if result.ok { "DIM".into() } else { "ERR".into() },
+                level: if result.ok {
+                    "DIM".into()
+                } else {
+                    "ERR".into()
+                },
                 message: line.clone(),
             },
         );
@@ -320,7 +339,11 @@ pub fn run() {
             let menu = build_tray_menu(app.handle(), &phase_label, true)?;
 
             let tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().cloned().expect("missing window icon"))
+                .icon(
+                    app.default_window_icon()
+                        .cloned()
+                        .expect("missing window icon"),
+                )
                 .menu(&menu)
                 .tooltip(&tip)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -396,6 +419,7 @@ pub fn run() {
             edit_model,
             remove_model,
             make_default,
+            configure_routing,
             fetch_models,
             parse_model_text,
             parse_model_file,

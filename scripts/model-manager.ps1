@@ -80,10 +80,13 @@ function Add-Profile {
     $litellmModel = Get-LiteLLMModelName -BaseUrl $baseUrl -ModelId $modelId
     $store = Read-ModelStore -ProjectRoot $projectRoot
     $id = [guid]::NewGuid().ToString('N')
-    $profile = [pscustomobject]@{ id = $id; name = $name; base_url = $baseUrl; api_key = $apiKey; model_id = $modelId; litellm_model = $litellmModel }
+    $profile = [pscustomobject]@{ id = $id; name = $name; base_url = $baseUrl; api_key = $apiKey; model_id = $modelId; litellm_model = $litellmModel; routing_enabled = $true; routing_weight = 1 }
     $profiles = @($store.profiles) + @($profile)
     $defaultId = if ($store.default_id) { $store.default_id } else { $id }
-    Save-ModelStore -ProjectRoot $projectRoot -Store ([pscustomobject]@{ version = 1; default_id = $defaultId; profiles = $profiles })
+    $store.version = 2
+    $store.default_id = $defaultId
+    $store.profiles = $profiles
+    Save-ModelStore -ProjectRoot $projectRoot -Store $store
     $apiKey = $null
     Write-Host "Saved: $name ($litellmModel)"
 }
@@ -96,7 +99,10 @@ function Delete-Profile {
     $profiles = @($store.profiles | Where-Object { $_.id -ne $profile.id })
     $defaultId = $store.default_id
     if ($defaultId -eq $profile.id) { $defaultId = if ($profiles.Count -gt 0) { $profiles[0].id } else { '' } }
-    Save-ModelStore -ProjectRoot $projectRoot -Store ([pscustomobject]@{ version = 1; default_id = $defaultId; profiles = $profiles })
+    $store.version = 2
+    $store.default_id = $defaultId
+    $store.profiles = $profiles
+    Save-ModelStore -ProjectRoot $projectRoot -Store $store
     Write-Host "Deleted: $($profile.name)"
 }
 

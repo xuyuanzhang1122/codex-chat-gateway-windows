@@ -66,7 +66,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
 $rootFiles = @(
     '.gitignore', 'AGENTS.md', 'README.md', 'CHANGELOG.md', 'LICENSE',
     'THIRD_PARTY_NOTICES.md', 'VERSION',
-    'config.yaml', 'run_gateway.py'
+    'config.yaml', 'run_gateway.py', 'gateway_runtime.py'
 )
 foreach ($name in $rootFiles) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination (Join-Path $stage $name) -Force
@@ -113,6 +113,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Codex restore regression test failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Claude Desktop config regression test failed.' }
 & $portablePython (Join-Path $projectRoot 'tests\test_anthropic_gateway.py')
 if ($LASTEXITCODE -ne 0) { throw 'Anthropic gateway regression test failed.' }
+& $portablePython (Join-Path $projectRoot 'tests\test_gateway_routing.py')
+if ($LASTEXITCODE -ne 0) { throw 'Multi-account routing regression test failed.' }
+& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $projectRoot 'tests\test_model_store_v2.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'Model store v2 regression test failed.' }
 
 foreach ($file in Get-ChildItem -LiteralPath $stageScripts -Filter '*.ps1') {
     [void][scriptblock]::Create((Get-Content -LiteralPath $file.FullName -Raw))

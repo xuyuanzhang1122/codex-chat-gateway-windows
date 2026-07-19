@@ -5,12 +5,20 @@ export interface ModelProfile {
   api_key: string;
   model_id: string;
   litellm_model: string;
+  routing_enabled: boolean;
+  routing_weight: number;
+}
+
+export interface RoutingSettings {
+  enabled: boolean;
+  affinity_ttl_seconds: number;
 }
 
 export interface ModelStore {
   version: number;
   default_id: string;
   profiles: ModelProfile[];
+  routing: RoutingSettings;
 }
 
 export interface ModelInput {
@@ -18,6 +26,8 @@ export interface ModelInput {
   base_url: string;
   api_key: string;
   model_id: string;
+  routing_enabled: boolean;
+  routing_weight: number;
 }
 
 /** Parsed plaintext api.txt-style config from the backend. */

@@ -45,6 +45,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
+import { InputNumber, Switch } from "antd";
 import { api } from "./api";
 import { TitleBar } from "./TitleBar";
 import { installKnownUpdate, type UpdateProgress } from "./updater";
@@ -73,6 +74,7 @@ type ActionKey =
   | "autostart"
   | "logs"
   | "default"
+  | "routing"
   | "delete"
   | "import"
   | "update";
@@ -144,7 +146,12 @@ async function copyText(text: string): Promise<boolean> {
 function App() {
   const [page, setPage] = useState<Page>("gateway");
   const [status, setStatus] = useState<GatewayStatus>(emptyStatus);
-  const [store, setStore] = useState<ModelStore>({ version: 1, default_id: "", profiles: [] });
+  const [store, setStore] = useState<ModelStore>({
+    version: 2,
+    default_id: "",
+    profiles: [],
+    routing: { enabled: false, affinity_ttl_seconds: 3600 },
+  });
   const [info, setInfo] = useState<ProjectInfo | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogLine[]>([]);
@@ -338,14 +345,21 @@ function App() {
   };
 
   const saveModel = async (input: ModelInput, editId?: string) => {
+    const previous = editId ? store.profiles.find((p) => p.id === editId) : undefined;
+    const wasRouted = previous ? isProfileInRoutingPool(store, previous) : false;
     const next = editId
       ? await api.editModel(editId, input)
       : await api.createModel(input);
     setStore(next);
     setDialog(null);
     pushLog("OK", editId ? `已更新 ${input.name}` : `已保存 ${input.name}`);
+    const updated = editId
+      ? next.profiles.find((p) => p.id === editId)
+      : next.profiles[next.profiles.length - 1];
     const touched =
-      (editId && editId === store.default_id) || (!editId && next.profiles.length === 1);
+      (editId && editId === store.default_id) ||
+      (!editId && next.profiles.length === 1) ||
+      (store.routing.enabled && (wasRouted || !!updated && isProfileInRoutingPool(next, updated)));
     if (live && touched) {
       const yes = await confirm({
         title: "重启网关",
@@ -527,6 +541,10 @@ function App() {
                             models,
                             parsed.name_hint,
                           );
+                          const existingIds = new Set(store.profiles.map((p) => p.id));
+                          const addedToRoutingPool = next.profiles.some(
+                            (p) => !existingIds.has(p.id) && isProfileInRoutingPool(next, p),
+                          );
                           setStore(next);
                           showFeedback({
                             key: "import",
@@ -538,6 +556,18 @@ function App() {
                             "OK",
                             `已从文本导入 ${models.length} 个模型 · ${parsed.base_url}`,
                           );
+                          if (live && store.routing.enabled && addedToRoutingPool) {
+                            const yes = await confirm({
+                              title: "重启网关",
+                              content: "导入内容新增了当前模型的分流账号。是否立即重启网关？",
+                              okText: "立即重启",
+                              cancelText: "稍后",
+                            });
+                            if (yes) {
+                              beginAction("restart", "正在重启网关…");
+                              void api.restart();
+                            }
+                          }
                         } catch (e) {
                           showFeedback({
                             key: "import",
@@ -546,6 +576,41 @@ function App() {
                           });
                           pendingKey.current = null;
                           pushLog("ERR", `导入失败: ${String(e)}`);
+                        }
+                      })();
+                    }}
+                    onRoutingChange={(enabled) => {
+                      void (async () => {
+                        beginAction("routing", enabled ? "正在开启模型分流…" : "正在关闭模型分流…");
+                        try {
+                          const next = await api.configureRouting(
+                            enabled,
+                            store.routing.affinity_ttl_seconds || 3600,
+                          );
+                          setStore(next);
+                          showFeedback({
+                            key: "routing",
+                            state: "ok",
+                            message: enabled ? "模型分流已开启" : "模型分流已关闭",
+                          });
+                          pendingKey.current = null;
+                          pushLog("OK", enabled ? "已开启同模型多账号分流" : "已关闭模型分流");
+                          if (live) {
+                            const yes = await confirm({
+                              title: "重启网关",
+                              content: "分流设置已变更，重启后生效。是否立即重启？",
+                              okText: "立即重启",
+                              cancelText: "稍后",
+                            });
+                            if (yes) {
+                              beginAction("restart", "正在重启网关…");
+                              void api.restart();
+                            }
+                          }
+                        } catch (e) {
+                          showFeedback({ key: "routing", state: "err", message: String(e) });
+                          pendingKey.current = null;
+                          pushLog("ERR", String(e));
                         }
                       })();
                     }}
@@ -607,6 +672,7 @@ function App() {
                       const p = store.profiles.find((x) => x.id === id);
                       if (!p) return;
                       const wasDefault = p.id === store.default_id;
+                      const wasRouted = isProfileInRoutingPool(store, p);
                       const ok = await confirm({
                         title: "确认删除",
                         content: `删除模型配置「${p.name}」？此操作不可撤销。`,
@@ -621,10 +687,12 @@ function App() {
                         showFeedback({ key: "delete", state: "ok", message: `已删除 ${p.name}` });
                         pendingKey.current = null;
                         pushLog("OK", `已删除 ${p.name}`);
-                        if (live && wasDefault) {
+                        if (live && (wasDefault || wasRouted)) {
                           const yes = await confirm({
                             title: "重启网关",
-                            content: "删除的是默认模型。是否立即重启网关以应用新的默认配置？",
+                            content: wasDefault
+                              ? "删除的是默认模型。是否立即重启网关以应用新的默认配置？"
+                              : "删除的是当前分流池账号。是否立即重启网关以更新路由？",
                             okText: "立即重启",
                             cancelText: "稍后",
                           });
@@ -1215,6 +1283,21 @@ async function resolveImportModels(
   }
 }
 
+function normalizedModelId(value: string) {
+  const normalized = value.trim().toLowerCase();
+  const [provider, ...rest] = normalized.split("/");
+  return rest.length > 0 && ["openai", "custom_openai", "deepseek"].includes(provider)
+    ? rest.join("/")
+    : normalized;
+}
+
+function isProfileInRoutingPool(store: ModelStore, profile: ModelProfile) {
+  if (!store.routing.enabled || !profile.routing_enabled) return false;
+  const current =
+    store.profiles.find((item) => item.id === store.default_id) ?? store.profiles[0];
+  return !!current && normalizedModelId(profile.model_id) === normalizedModelId(current.model_id);
+}
+
 function ModelsView({
   store,
   selectedId,
@@ -1223,6 +1306,7 @@ function ModelsView({
   onSelect,
   onAdd,
   onImport,
+  onRoutingChange,
   onEdit,
   onDefault,
   onDelete,
@@ -1235,6 +1319,7 @@ function ModelsView({
   onSelect: (id: string) => void;
   onAdd: () => void;
   onImport: () => void;
+  onRoutingChange: (enabled: boolean) => void;
   onEdit: () => void;
   onDefault: () => void;
   onDelete: () => void;
@@ -1243,6 +1328,15 @@ function ModelsView({
   const activeId = selectedId || store.default_id || store.profiles[0]?.id || null;
   const activeIsDefault = !!activeId && activeId === store.default_id;
   const onlyOne = store.profiles.length === 1;
+  const defaultProfile =
+    store.profiles.find((p) => p.id === store.default_id) ?? store.profiles[0];
+  const routingCount = defaultProfile
+    ? store.profiles.filter(
+        (p) =>
+          p.routing_enabled &&
+          normalizedModelId(p.model_id) === normalizedModelId(defaultProfile.model_id),
+      ).length
+    : 0;
 
   return (
     <Flexbox gap={14} style={{ height: "100%" }}>
@@ -1260,6 +1354,30 @@ function ModelsView({
           </Button>
         </Flexbox>
       </Flexbox>
+
+      {store.profiles.length > 0 && (
+        <Block variant="outlined" padding={14}>
+          <Flexbox horizontal distribution="space-between" align="center" gap={16}>
+            <Flexbox gap={4}>
+              <Text weight={700}>同模型多账号分流</Text>
+              <Text type="secondary" fontSize={12}>
+                当前默认模型 {defaultProfile?.model_id} · {routingCount} 个账号参与 · 会话亲和约 {Math.round((store.routing.affinity_ttl_seconds || 3600) / 60)} 分钟
+              </Text>
+              {store.routing.enabled && routingCount < 2 && (
+                <Text type="warning" fontSize={11}>
+                  当前只有 1 个可用账号；再添加同模型账号后才会产生额度分流。
+                </Text>
+              )}
+            </Flexbox>
+            <Switch
+              checked={store.routing.enabled}
+              loading={isLoading(feedback, "routing")}
+              disabled={busy}
+              onChange={onRoutingChange}
+            />
+          </Flexbox>
+        </Block>
+      )}
 
       {store.profiles.length === 0 ? (
         <>
@@ -1317,6 +1435,11 @@ function ModelsView({
                     <Text type="secondary" fontSize={11} ellipsis>
                       {p.base_url}
                     </Text>
+                    <Flexbox horizontal gap={6} align="center">
+                      <Tag color={p.routing_enabled ? "blue" : "default"}>
+                        {p.routing_enabled ? `分流 × ${p.routing_weight}` : "不参与分流"}
+                      </Tag>
+                    </Flexbox>
                   </Flexbox>
                 </Block>
               );
@@ -1360,7 +1483,7 @@ function ModelsView({
           </Flexbox>
           <FeedbackAlert
             feedback={
-              feedback && ["default", "delete", "import"].includes(feedback.key)
+              feedback && ["default", "delete", "import", "routing"].includes(feedback.key)
                 ? feedback
                 : null
             }
@@ -1663,6 +1786,8 @@ function ModelDialog({
   const [url, setUrl] = useState(profile?.base_url ?? "");
   const [key, setKey] = useState(profile?.api_key ?? "");
   const [modelId, setModelId] = useState(profile?.model_id ?? "");
+  const [routingEnabled, setRoutingEnabled] = useState(profile?.routing_enabled ?? true);
+  const [routingWeight, setRoutingWeight] = useState(profile?.routing_weight ?? 1);
   const [msg, setMsg] = useState<string>("");
   const [msgType, setMsgType] = useState<"success" | "error" | "info">("info");
   const [fetching, setFetching] = useState(false);
@@ -1730,6 +1855,8 @@ function ModelDialog({
                         base_url: url.trim().replace(/\/+$/, ""),
                         api_key: key,
                         model_id: modelId.trim(),
+                        routing_enabled: routingEnabled,
+                        routing_weight: Math.max(1, Math.min(100, routingWeight || 1)),
                       },
                       mode === "edit" ? profile?.id : undefined,
                     );
@@ -1805,6 +1932,32 @@ function ModelDialog({
               <Button loading={fetching} onClick={() => void fetchList()}>
                 在线获取
               </Button>
+            </Flexbox>
+          </FormItem>
+          <FormItem label="同模型分流">
+            <Flexbox horizontal distribution="space-between" align="center" gap={12}>
+              <Flexbox gap={2}>
+                <Text fontSize={12}>参与当前默认模型的多账号路由</Text>
+                <Text type="secondary" fontSize={11}>
+                  同一会话会优先保持在同一家，故障时才切换。
+                </Text>
+              </Flexbox>
+              <Switch checked={routingEnabled} onChange={setRoutingEnabled} />
+            </Flexbox>
+          </FormItem>
+          <FormItem label="分流权重">
+            <Flexbox horizontal gap={10} align="center">
+              <InputNumber
+                min={1}
+                max={100}
+                precision={0}
+                value={routingWeight}
+                disabled={!routingEnabled}
+                onChange={(value) => setRoutingWeight(value ?? 1)}
+              />
+              <Text type="secondary" fontSize={11}>
+                例如 3:1 表示新会话约 75%:25%；不会拆分已建立的会话。
+              </Text>
             </Flexbox>
           </FormItem>
           {msg && (

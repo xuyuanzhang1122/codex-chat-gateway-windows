@@ -81,6 +81,7 @@ model:deepseek-v4-flash,deepseek-v4-pro
 |---|---|
 | **Studio console** | Tauri 2 + React + [LobeHub UI](https://ui.lobehub.com/), frameless dark UI; closing the window just sends it to the tray — **the gateway keeps running**. |
 | **Models** | CRUD, default-model switching, online `/models` fetch, one-click txt import. |
+| **Multi-account routing** | Weighted routing across accounts serving the same model, with session/cache affinity, cooldown, and failover. See [routing behavior](docs/MODEL_ROUTING.md). |
 | **Client wiring** | One-click Codex provider and Claude Desktop Code mode (3P Profile); one-click restore keeps your MCP servers and other profiles untouched. |
 | **Auto-update** | Click "Check for updates" in the console; update packages are minisign-verified and **never touch your `.gateway` config**. |
 | **Installer** | Per-user install (no admin needed), English/Chinese UI, optional login autostart; can remove the legacy C# desktop for you. |

@@ -454,6 +454,13 @@ namespace CodexChatGateway.Desktop
         public int version { get; set; }
         public string default_id { get; set; }
         public List<ModelProfile> profiles { get; set; }
+        public RoutingSettings routing { get; set; }
+    }
+
+    internal sealed class RoutingSettings
+    {
+        public bool enabled { get; set; }
+        public int affinity_ttl_seconds { get; set; }
     }
 
     internal sealed class ModelProfile
@@ -464,6 +471,8 @@ namespace CodexChatGateway.Desktop
         public string api_key { get; set; }
         public string model_id { get; set; }
         public string litellm_model { get; set; }
+        public bool? routing_enabled { get; set; }
+        public int routing_weight { get; set; }
     }
 
     internal sealed class GatewayState
@@ -519,22 +528,44 @@ namespace CodexChatGateway.Desktop
             ModelStore store = Json.Deserialize<ModelStore>(File.ReadAllText(path, Encoding.UTF8));
             if (store == null) return EmptyStore();
             if (store.profiles == null) store.profiles = new List<ModelProfile>();
+            NormalizeStore(store);
             return store;
         }
 
         public static ModelStore EmptyStore()
         {
-            return new ModelStore { version = 1, default_id = "", profiles = new List<ModelProfile>() };
+            return new ModelStore
+            {
+                version = 2,
+                default_id = "",
+                profiles = new List<ModelProfile>(),
+                routing = new RoutingSettings { enabled = false, affinity_ttl_seconds = 3600 }
+            };
         }
 
         public static void SaveStore(string root, ModelStore store)
         {
+            NormalizeStore(store);
             string path = StorePath(root);
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             string temp = path + ".desktop.tmp";
             File.WriteAllText(temp, Json.Serialize(store), new UTF8Encoding(false));
             if (File.Exists(path)) File.Replace(temp, path, path + ".bak", true);
             else File.Move(temp, path);
+        }
+
+        private static void NormalizeStore(ModelStore store)
+        {
+            store.version = 2;
+            if (store.profiles == null) store.profiles = new List<ModelProfile>();
+            if (store.routing == null)
+                store.routing = new RoutingSettings { enabled = false, affinity_ttl_seconds = 3600 };
+            if (store.routing.affinity_ttl_seconds <= 0) store.routing.affinity_ttl_seconds = 3600;
+            foreach (ModelProfile profile in store.profiles)
+            {
+                if (!profile.routing_enabled.HasValue) profile.routing_enabled = true;
+                if (profile.routing_weight <= 0) profile.routing_weight = 1;
+            }
         }
 
         public static string LiteLLMModel(string baseUrl, string modelId)
@@ -575,7 +606,9 @@ namespace CodexChatGateway.Desktop
                 base_url = baseUrl.TrimEnd('/'),
                 api_key = apiKey,
                 model_id = modelId,
-                litellm_model = model
+                litellm_model = model,
+                routing_enabled = true,
+                routing_weight = 1
             };
             ModelStore store = EmptyStore();
             store.default_id = id;
@@ -1580,11 +1613,13 @@ namespace CodexChatGateway.Desktop
         private readonly TextBox modelBox;
         private readonly TextBlock statusText;
         private readonly Button fetchButton;
+        private readonly ModelProfile source;
 
         public ModelProfile Profile { get; private set; }
 
         public ModelDialog(ModelProfile source)
         {
+            this.source = source;
             Title = source == null ? "添加模型" : "编辑模型";
             Width = 520;
             Height = 596;
@@ -1759,7 +1794,9 @@ namespace CodexChatGateway.Desktop
                 base_url = cleanUrl,
                 api_key = key,
                 model_id = modelId,
-                litellm_model = Store.LiteLLMModel(cleanUrl, modelId)
+                litellm_model = Store.LiteLLMModel(cleanUrl, modelId),
+                routing_enabled = source == null || !source.routing_enabled.HasValue ? true : source.routing_enabled,
+                routing_weight = source == null || source.routing_weight <= 0 ? 1 : source.routing_weight
             };
             DialogResult = true;
         }

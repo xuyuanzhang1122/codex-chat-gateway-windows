@@ -139,6 +139,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $runtimeSource 'python.exe'))) {
 # 3) Assemble Studio payload
 $rootFiles = @(
     'run_gateway.py',
+    'gateway_runtime.py',
     'config.yaml',
     'requirements.txt',
     'VERSION',

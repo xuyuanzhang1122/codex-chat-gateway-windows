@@ -13,6 +13,27 @@ pub struct ModelProfile {
     pub api_key: String,
     pub model_id: String,
     pub litellm_model: String,
+    #[serde(default = "default_true")]
+    pub routing_enabled: bool,
+    #[serde(default = "default_routing_weight")]
+    pub routing_weight: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_affinity_ttl_seconds")]
+    pub affinity_ttl_seconds: u64,
+}
+
+impl Default for RoutingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            affinity_ttl_seconds: default_affinity_ttl_seconds(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,14 +41,17 @@ pub struct ModelStore {
     pub version: i32,
     pub default_id: String,
     pub profiles: Vec<ModelProfile>,
+    #[serde(default)]
+    pub routing: RoutingSettings,
 }
 
 impl Default for ModelStore {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             default_id: String::new(),
             profiles: Vec::new(),
+            routing: RoutingSettings::default(),
         }
     }
 }
@@ -38,6 +62,22 @@ pub struct ModelInput {
     pub base_url: String,
     pub api_key: String,
     pub model_id: String,
+    #[serde(default = "default_true")]
+    pub routing_enabled: bool,
+    #[serde(default = "default_routing_weight")]
+    pub routing_weight: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_routing_weight() -> u32 {
+    1
+}
+
+fn default_affinity_ttl_seconds() -> u64 {
+    3600
 }
 
 pub fn litellm_model(base_url: &str, model_id: &str) -> String {
@@ -72,6 +112,11 @@ pub fn read_store() -> Result<ModelStore, String> {
     let text = fs::read_to_string(&path).map_err(|e| format!("读取模型配置失败: {e}"))?;
     let mut store: ModelStore =
         serde_json::from_str(&text).map_err(|e| format!("解析 models.json 失败: {e}"))?;
+    store.version = 2;
+    store.routing.affinity_ttl_seconds = store.routing.affinity_ttl_seconds.clamp(300, 86_400);
+    for profile in &mut store.profiles {
+        profile.routing_weight = profile.routing_weight.clamp(1, 100);
+    }
     if store.default_id.is_empty() {
         if let Some(first) = store.profiles.first() {
             store.default_id = first.id.clone();
@@ -117,9 +162,7 @@ fn import_legacy_env(root: &Path) -> Result<Option<ModelStore>, String> {
         if let Some((k, v)) = trimmed.split_once('=') {
             values.insert(
                 k.trim().to_string(),
-                v.trim()
-                    .trim_matches(|c| c == '"' || c == '\'')
-                    .to_string(),
+                v.trim().trim_matches(|c| c == '"' || c == '\'').to_string(),
             );
         }
     }
@@ -145,11 +188,14 @@ fn import_legacy_env(root: &Path) -> Result<Option<ModelStore>, String> {
         api_key,
         model_id,
         litellm_model: model,
+        routing_enabled: true,
+        routing_weight: default_routing_weight(),
     };
     let store = ModelStore {
-        version: 1,
+        version: 2,
         default_id: id,
         profiles: vec![profile],
+        routing: RoutingSettings::default(),
     };
     save_store(&store)?;
     Ok(Some(store))
@@ -176,6 +222,8 @@ pub fn add_profile(input: ModelInput) -> Result<ModelStore, String> {
         api_key: input.api_key,
         model_id: model_id.clone(),
         litellm_model: litellm_model(&base_url, &model_id),
+        routing_enabled: input.routing_enabled,
+        routing_weight: input.routing_weight.clamp(1, 100),
     };
     if store.default_id.is_empty() {
         store.default_id = id;
@@ -198,6 +246,8 @@ pub fn update_profile(id: &str, input: ModelInput) -> Result<ModelStore, String>
     profile.api_key = input.api_key;
     profile.model_id = model_id.clone();
     profile.litellm_model = litellm_model(&base_url, &model_id);
+    profile.routing_enabled = input.routing_enabled;
+    profile.routing_weight = input.routing_weight.clamp(1, 100);
     save_store(&store)?;
     Ok(store)
 }
@@ -222,6 +272,14 @@ pub fn set_default(id: &str) -> Result<ModelStore, String> {
         return Err("未找到该模型配置".into());
     }
     store.default_id = id.to_string();
+    save_store(&store)?;
+    Ok(store)
+}
+
+pub fn set_routing(enabled: bool, affinity_ttl_seconds: u64) -> Result<ModelStore, String> {
+    let mut store = read_store()?;
+    store.routing.enabled = enabled;
+    store.routing.affinity_ttl_seconds = affinity_ttl_seconds.clamp(300, 86_400);
     save_store(&store)?;
     Ok(store)
 }
@@ -265,7 +323,11 @@ pub fn fetch_remote_models(base_url: &str, api_key: &str) -> Result<Vec<String>,
         .ok_or_else(|| "接口返回中没有 data 字段".to_string())?;
     let mut ids: Vec<String> = data
         .iter()
-        .filter_map(|item| item.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .filter_map(|item| {
+            item.get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .filter(|s| !s.is_empty())
         .collect();
     ids.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
@@ -302,9 +364,8 @@ pub fn parse_api_text(text: &str) -> Result<ParsedApiText, String> {
         if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
             continue;
         }
-        let (k, v) = split_kv(line).ok_or_else(|| {
-            format!("无法解析行（需要 key:value）: {}", truncate_for_err(line))
-        })?;
+        let (k, v) = split_kv(line)
+            .ok_or_else(|| format!("无法解析行（需要 key:value）: {}", truncate_for_err(line)))?;
         let key = normalize_key(&k);
         if key.is_empty() {
             continue;
@@ -315,19 +376,20 @@ pub fn parse_api_text(text: &str) -> Result<ParsedApiText, String> {
     let base_url = take_first(
         &map,
         &[
-            "baseurl",
-            "base_url",
-            "apiurl",
-            "api_url",
-            "url",
-            "endpoint",
-            "host",
+            "baseurl", "base_url", "apiurl", "api_url", "url", "endpoint", "host",
         ],
     )
     .unwrap_or_default();
     let api_key = take_first(
         &map,
-        &["key", "api_key", "apikey", "token", "secret", "authorization"],
+        &[
+            "key",
+            "api_key",
+            "apikey",
+            "token",
+            "secret",
+            "authorization",
+        ],
     )
     .unwrap_or_default();
     let model_raw = take_first(
@@ -344,10 +406,11 @@ pub fn parse_api_text(text: &str) -> Result<ParsedApiText, String> {
         return Err("未识别到 API Key（key / api_key）".into());
     }
 
-    let model_missing = model_raw.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true);
-    let models = model_raw
-        .map(|s| split_models(&s))
-        .unwrap_or_default();
+    let model_missing = model_raw
+        .as_ref()
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true);
+    let models = model_raw.map(|s| split_models(&s)).unwrap_or_default();
 
     Ok(ParsedApiText {
         base_url,
@@ -398,11 +461,12 @@ pub fn import_profiles(
         } else {
             format!("{host_hint} · {mid}")
         };
-        // Skip exact duplicates (same url + model_id)
+        // Skip only exact account duplicates. Different keys on the same platform are
+        // valid independent deployments for quota distribution.
         if store
             .profiles
             .iter()
-            .any(|p| p.base_url == base_url && p.model_id == mid)
+            .any(|p| p.base_url == base_url && p.model_id == mid && p.api_key == api_key.trim())
         {
             continue;
         }
@@ -414,6 +478,8 @@ pub fn import_profiles(
             api_key: api_key.trim().to_string(),
             model_id: mid.to_string(),
             litellm_model: litellm_model(&base_url, mid),
+            routing_enabled: true,
+            routing_weight: default_routing_weight(),
         };
         if store.default_id.is_empty() {
             store.default_id = id;
@@ -459,7 +525,9 @@ fn split_kv(line: &str) -> Option<(String, String)> {
 
 fn normalize_key(k: &str) -> String {
     k.trim()
-        .trim_matches(|c: char| c == '"' || c == '\'' || c == '【' || c == '】' || c == '[' || c == ']')
+        .trim_matches(|c: char| {
+            c == '"' || c == '\'' || c == '【' || c == '】' || c == '[' || c == ']'
+        })
         .chars()
         .map(|c| if c == '-' || c == ' ' { '_' } else { c })
         .collect::<String>()
@@ -478,7 +546,10 @@ fn take_first(map: &std::collections::HashMap<String, String>, keys: &[&str]) ->
 fn split_models(raw: &str) -> Vec<String> {
     let mut out = Vec::new();
     for part in raw.split(|c: char| c == ',' || c == ';' || c == '|' || c == '\n' || c == '、') {
-        let m = part.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+        let m = part
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .to_string();
         if !m.is_empty() && !out.iter().any(|x: &String| x == &m) {
             out.push(m);
         }

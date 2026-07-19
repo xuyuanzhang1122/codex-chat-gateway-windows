@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- 新增同模型多账号加权分流：`models.json` v2、会话/缓存亲和、失败冷却与同模型账号故障切换。
+- Studio 模型页新增分流总开关、账号参与开关和权重；旧 PowerShell/WPF 入口可无损保留 v2 配置。
+
 ## 1.3.0
 
 - **Studio 控制台**（`desktop-tauri/`）：Tauri 2 + React + LobeHub；无边框、托盘关窗不杀网关；去掉多余启动闪屏。

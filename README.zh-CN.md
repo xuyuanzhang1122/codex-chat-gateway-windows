@@ -81,6 +81,7 @@ model:deepseek-v4-flash,deepseek-v4-pro
 |---|---|
 | **Studio 控制台** | Tauri 2 + React + [LobeHub UI](https://ui.lobehub.com/)，无边框深色界面；关窗自动进托盘，**网关照跑不误**。 |
 | **模型管理** | 增删改、默认模型切换、在线拉取 `/models`、txt 文本一键导入。 |
+| **同模型多账号分流** | 按权重分配新会话，同一会话保持平台亲和；额度/故障时自动冷却与切换。详见[分流与缓存说明](docs/MODEL_ROUTING.md)。 |
 | **客户端接入** | 一键写 Codex 提供方、一键配置 Claude Desktop Code 模式（3P Profile）；想恢复官方配置也是一键，MCP 和其他 Profile 原样保留。 |
 | **自动更新** | 控制台里点「检查更新」即可，更新包经 minisign 验签；**绝不动你的 `.gateway` 配置**。 |
 | **安装包** | 用户级安装（不需要管理员）、中英文界面、可选登录自启；能帮你顺手卸掉旧版 C# 桌面程序。 |
