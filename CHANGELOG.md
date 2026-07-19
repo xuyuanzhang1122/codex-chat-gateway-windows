@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.4.1 - 2026-07-19
+
+- 修复安装版启动网关即退：`run_gateway.py` 现在显式把脚本目录加入 `sys.path`，不再依赖嵌入式 Python `._pth` 的搜索路径。
+- 修复控制台「打开日志目录」等按钮报 `plugin:opener|open_path not allowed by ACL`：capabilities 补 `opener:allow-open-path`。
+
 ## 1.4.0 - 2026-07-19
 
 - 新增同模型多账号加权分流：`models.json` v3、会话/缓存亲和、失败冷却与同模型账号故障切换。

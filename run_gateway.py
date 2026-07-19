@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import os
 import sys
+
+# Embeddable Python (python311._pth) does not put the script directory on
+# sys.path; add it explicitly so gateway_runtime is importable.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def configure_utf8_stdio() -> None:
