@@ -58,6 +58,14 @@ Once a request uses a route, its animated connection stays on the map. This make
   <img src="docs/assets/studio-routing-preview-v1.4.0.png" width="920" alt="Live model to upstream routing preview">
 </p>
 
+### Client wiring and updates
+
+Configure or restore Codex and Claude Desktop independently, manage login autostart, and check signed Studio updates from one page. Client restore keeps unrelated MCP servers and profiles intact.
+
+<p align="center">
+  <img src="docs/assets/studio-clients-v1.4.0.png" width="920" alt="Codex and Claude Desktop client wiring">
+</p>
+
 ## What is this
 
 Codex speaks the Responses API. Claude Desktop's Code mode speaks Anthropic Messages. Most third-party models only offer OpenAI-style Chat Completions — so good models sit unused because the protocols don't line up.

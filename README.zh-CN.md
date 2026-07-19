@@ -58,6 +58,14 @@
   <img src="docs/assets/studio-routing-preview-v1.4.0.png" width="920" alt="模型到上游网站的实时分流预览">
 </p>
 
+### 客户端接入与更新
+
+Codex 和 Claude Desktop 可分别配置或恢复官方模式，并在同一页管理登录自启和签名更新检查；恢复操作会保留无关的 MCP 与其他 Profile。
+
+<p align="center">
+  <img src="docs/assets/studio-clients-v1.4.0.png" width="920" alt="Codex 与 Claude Desktop 客户端接入">
+</p>
+
 ## 这是什么
 
 Codex 只认 Responses API，Claude Desktop 的 Code 模式只认 Anthropic Messages——而你手里的第三方模型，大多只提供 OpenAI 风格的 Chat Completions。协议对不上，好模型就用不上。
