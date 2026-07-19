@@ -11,10 +11,15 @@ def configure_utf8_stdio() -> None:
 
 if __name__ == "__main__":
     configure_utf8_stdio()
-    from gateway_runtime import install_prompt_cache_affinity, prepare_gateway_runtime
+    from gateway_runtime import (
+        install_prompt_cache_affinity,
+        install_routing_telemetry,
+        prepare_gateway_runtime,
+    )
 
     prepare_gateway_runtime()
     install_prompt_cache_affinity()
+    install_routing_telemetry()
     from litellm import run_server
 
     run_server()

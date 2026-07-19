@@ -6,11 +6,13 @@ import type {
   ModelStore,
   ParsedApiText,
   ProjectInfo,
+  RoutingTrafficStore,
 } from "./types";
 
 export const api = {
   status: () => invoke<GatewayStatus>("get_status"),
   projectInfo: () => invoke<ProjectInfo>("get_project_info"),
+  routingTraffic: () => invoke<RoutingTrafficStore>("get_routing_traffic"),
   listModels: () => invoke<ModelStore>("list_models"),
   createModel: (input: ModelInput) => invoke<ModelStore>("create_model", { input }),
   editModel: (id: string, input: ModelInput) =>

@@ -63,6 +63,9 @@ def main() -> None:
     codex = [item for item in runtime["model_list"] if item["model_name"] == "codex-chat"]
     assert [item["litellm_params"]["weight"] for item in codex] == [3, 1]
     assert codex[0]["litellm_params"]["model"] == "os.environ/CCG_ROUTE_0_MODEL"
+    assert codex[0]["model_info"]["ccg_profile_id"] == "account-a"
+    assert codex[0]["model_info"]["ccg_model_id"] == "gpt-5.6-sol"
+    assert codex[0]["model_info"]["ccg_upstream_host"] == "account-a.example"
     assert os.environ["CCG_ROUTE_1_CLAUDE_MODEL"] == "custom_openai/gpt-5.6-sol"
     assert runtime["router_settings"]["max_fallbacks"] == 1
     assert runtime["router_settings"]["deployment_affinity_ttl_seconds"] == 7200
@@ -75,6 +78,10 @@ def main() -> None:
         old_path = gateway_runtime.MODELS_PATH
         gateway_runtime.MODELS_PATH = models_path
         try:
+            os.environ["CCG_DISABLE_MULTI_ACCOUNT_ROUTING"] = "1"
+            assert gateway_runtime._read_routing_pool() is None
+            os.environ.pop("CCG_DISABLE_MULTI_ACCOUNT_ROUTING")
+
             # A v1 store has no global opt-in, so an upgrade keeps single-account behavior.
             models_path.write_text(
                 json.dumps({"version": 1, "default_id": "account-a", "profiles": [first]}),
@@ -120,7 +127,33 @@ def main() -> None:
             )
             assert gateway_runtime._read_routing_pool() is None
         finally:
+            os.environ.pop("CCG_DISABLE_MULTI_ACCOUNT_ROUTING", None)
             gateway_runtime.MODELS_PATH = old_path
+
+    with tempfile.TemporaryDirectory() as temporary:
+        traffic_path = Path(temporary) / "routing-traffic.json"
+        callback_kwargs = {
+            "litellm_call_id": "call-1",
+            "metadata": {
+                "api_base": "https://account-a.example/v1",
+                "model_info": {
+                    "ccg_profile_id": "account-a",
+                    "ccg_profile_name": "Account A",
+                    "ccg_model_id": "gpt-5.6-sol",
+                    "ccg_upstream_host": "account-a.example",
+                },
+            },
+        }
+        assert gateway_runtime._record_routing_event(callback_kwargs, traffic_path)
+        # Duplicate callback delivery for one LiteLLM call must not double count.
+        assert not gateway_runtime._record_routing_event(callback_kwargs, traffic_path)
+        callback_kwargs["litellm_call_id"] = "call-2"
+        assert gateway_runtime._record_routing_event(callback_kwargs, traffic_path)
+        traffic = json.loads(traffic_path.read_text(encoding="utf-8"))
+        assert traffic["routes"][0]["hit_count"] == 2
+        serialized_traffic = json.dumps(traffic)
+        assert "sk-secret" not in serialized_traffic
+        assert "messages" not in serialized_traffic
 
     gateway_runtime.install_prompt_cache_affinity()
     from litellm.responses.litellm_completion_transformation.transformation import (
@@ -142,6 +175,14 @@ def main() -> None:
     assert affinity is not None and affinity.startswith("ccg-cache-")
     assert "metadata" not in transformed
     assert "do-not-forward" not in json.dumps(transformed)
+
+    gateway_runtime.install_routing_telemetry()
+    import litellm
+
+    assert any(
+        type(callback).__name__ == "RoutingTelemetryCallback"
+        for callback in litellm.callbacks
+    )
 
     print("GATEWAY_ROUTING_OK")
 

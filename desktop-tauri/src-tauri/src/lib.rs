@@ -12,6 +12,7 @@ use models::{
     ParsedApiText,
 };
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -47,6 +48,45 @@ fn get_project_info() -> serde_json::Value {
             "ui_kit_name": "LobeHub UI",
         }
     })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RoutingTrafficRoute {
+    model_id: String,
+    profile_id: String,
+    profile_name: String,
+    upstream_host: String,
+    hit_count: u64,
+    first_seen_at: String,
+    last_seen_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RoutingTrafficStore {
+    version: u32,
+    #[serde(default)]
+    routes: Vec<RoutingTrafficRoute>,
+}
+
+impl Default for RoutingTrafficStore {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            routes: Vec::new(),
+        }
+    }
+}
+
+#[tauri::command]
+fn get_routing_traffic() -> Result<RoutingTrafficStore, String> {
+    let path = paths::project_root()
+        .join(".gateway")
+        .join("routing-traffic.json");
+    if !path.is_file() {
+        return Ok(RoutingTrafficStore::default());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("读取分流轨迹失败: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("解析分流轨迹失败: {e}"))
 }
 
 #[tauri::command]
@@ -426,6 +466,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_project_info,
+            get_routing_traffic,
             list_models,
             create_model,
             edit_model,

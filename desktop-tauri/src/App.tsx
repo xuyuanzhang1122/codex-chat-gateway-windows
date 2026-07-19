@@ -27,6 +27,7 @@ import {
   Copy,
   ExternalLink,
   FolderOpen,
+  GitBranch,
   Layers3,
   Pencil,
   Play,
@@ -48,6 +49,7 @@ import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { InputNumber, Switch } from "antd";
 import { api } from "./api";
 import { TitleBar } from "./TitleBar";
+import { RoutingMapView } from "./RoutingMap";
 import { installKnownUpdate, type UpdateProgress } from "./updater";
 import type {
   GatewayStatus,
@@ -58,9 +60,10 @@ import type {
   ModelStore,
   ParsedApiText,
   ProjectInfo,
+  RoutingTrafficStore,
 } from "./types";
 
-type Page = "gateway" | "models" | "clients" | "activity";
+type Page = "gateway" | "routing" | "models" | "clients" | "activity";
 
 type ActionKey =
   | "start"
@@ -153,6 +156,8 @@ function App() {
     routing: { enabled: false, affinity_ttl_seconds: 3600, model_rules: [] },
   });
   const [info, setInfo] = useState<ProjectInfo | null>(null);
+  const [traffic, setTraffic] = useState<RoutingTrafficStore>({ version: 1, routes: [] });
+  const [trafficError, setTrafficError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const logId = useRef(0);
@@ -325,6 +330,29 @@ function App() {
     };
   }, [pushLog, showFeedback]);
 
+  useEffect(() => {
+    if (page !== "routing") return;
+    let active = true;
+    const refresh = () => {
+      void api
+        .routingTraffic()
+        .then((next) => {
+          if (!active) return;
+          setTraffic(next);
+          setTrafficError(null);
+        })
+        .catch((error) => {
+          if (active) setTrafficError(String(error));
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 1_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [page]);
+
   const hasDefault = store.profiles.some((p) => p.id === store.default_id);
   const busy = status.busy || feedback?.state === "loading";
   // Prefer our-gateway running state; foreign port occupancy should not look "fully live"
@@ -440,6 +468,7 @@ function App() {
   const navItems = useMemo(
     () => [
       { key: "gateway" as const, title: "网关", icon: Server },
+      { key: "routing" as const, title: "分流预览", icon: GitBranch },
       { key: "models" as const, title: "模型", icon: Layers3 },
       { key: "clients" as const, title: "客户端", icon: Users },
       { key: "activity" as const, title: "日志", icon: Activity },
@@ -753,6 +782,15 @@ function App() {
                   />
                 )}
 
+                {page === "routing" && (
+                  <RoutingMapView
+                    store={store}
+                    traffic={traffic}
+                    status={status}
+                    error={trafficError}
+                  />
+                )}
+
                 {page === "clients" && (
                   <ClientsView
                     busy={busy}
@@ -1018,6 +1056,7 @@ const PageHeader = memo(function PageHeader({
 }) {
   const meta = {
     gateway: { title: "网关运行时", sub: "本机 LiteLLM 进程 · 仅 127.0.0.1" },
+    routing: { title: "分流预览", sub: "真实选路轨迹 · 模型 → 上游网站" },
     models: { title: "上游模型", sub: "密钥保存在 .gateway/models.json" },
     clients: { title: "客户端接入", sub: "Codex / Claude Desktop · 可安全恢复" },
     activity: { title: "运行日志", sub: "后端事件流 · 脚本输出" },

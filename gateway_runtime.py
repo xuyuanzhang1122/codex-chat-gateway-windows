@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import sys
+import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -13,7 +18,10 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent
 MODELS_PATH = PROJECT_ROOT / ".gateway" / "models.json"
 RUNTIME_CONFIG_PATH = PROJECT_ROOT / ".gateway" / "runtime-config.yaml"
+ROUTING_TRAFFIC_PATH = PROJECT_ROOT / ".gateway" / "routing-traffic.json"
 _AFFINITY_SALT = os.urandom(32)
+_TELEMETRY_LOCK = threading.Lock()
+_RECENT_TELEMETRY_CALLS: dict[str, float] = {}
 
 
 def _prompt_cache_affinity_id(prompt_cache_key: Any) -> str:
@@ -55,6 +63,8 @@ def _model_routing_enabled(routing: dict[str, Any], model_id: str) -> bool:
 
 
 def _read_routing_pool() -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    if os.environ.get("CCG_DISABLE_MULTI_ACCOUNT_ROUTING") == "1":
+        return None
     if not MODELS_PATH.exists():
         return None
 
@@ -99,6 +109,146 @@ def _deployment_id(profile_id: str, model_name: str) -> str:
     return f"ccg-{profile_id[:16]}-{suffix}"
 
 
+def _routing_metadata(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    litellm_params = kwargs.get("litellm_params")
+    if not isinstance(litellm_params, dict):
+        litellm_params = {}
+    metadata = kwargs.get("metadata") or litellm_params.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    model_info = (
+        kwargs.get("model_info")
+        or metadata.get("model_info")
+        or litellm_params.get("model_info")
+        or {}
+    )
+    if not isinstance(model_info, dict):
+        model_info = {}
+    return metadata, model_info
+
+
+def _record_routing_event(
+    kwargs: dict[str, Any], traffic_path: Path | None = None
+) -> bool:
+    """Persist one privacy-safe model -> upstream hit.
+
+    The callback intentionally stores no prompt, response, token, key, headers, or
+    request identifier. Repeated callback delivery for the same call is deduplicated.
+    """
+
+    metadata, model_info = _routing_metadata(kwargs)
+    profile_id = str(model_info.get("ccg_profile_id") or "").strip()
+    model_id = str(model_info.get("ccg_model_id") or "").strip()
+    if not profile_id or not model_id:
+        return False
+
+    profile_name = str(model_info.get("ccg_profile_name") or profile_id).strip()
+    api_base = str(metadata.get("api_base") or kwargs.get("api_base") or "").strip()
+    upstream_host = str(model_info.get("ccg_upstream_host") or "").strip()
+    if not upstream_host and api_base:
+        upstream_host = urlsplit(api_base).hostname or ""
+    if not upstream_host:
+        upstream_host = "unknown-upstream"
+
+    call_id = str(
+        kwargs.get("litellm_call_id")
+        or kwargs.get("litellm_trace_id")
+        or metadata.get("litellm_call_id")
+        or ""
+    )
+    route_key = f"{_normalized_model_id(model_id)}::{profile_id}"
+    dedupe_key = f"{route_key}::{call_id}" if call_id else ""
+    path = traffic_path or ROUTING_TRAFFIC_PATH
+    now_epoch = time.time()
+    now_text = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    with _TELEMETRY_LOCK:
+        expired = [key for key, seen in _RECENT_TELEMETRY_CALLS.items() if now_epoch - seen > 120]
+        for key in expired:
+            _RECENT_TELEMETRY_CALLS.pop(key, None)
+        if dedupe_key and dedupe_key in _RECENT_TELEMETRY_CALLS:
+            return False
+        if dedupe_key:
+            _RECENT_TELEMETRY_CALLS[dedupe_key] = now_epoch
+
+        store: dict[str, Any] = {"version": 1, "routes": []}
+        try:
+            if path.exists():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict) and isinstance(loaded.get("routes"), list):
+                    store = loaded
+        except (OSError, ValueError):
+            # Telemetry must never interfere with an upstream request.
+            store = {"version": 1, "routes": []}
+
+        routes = store.setdefault("routes", [])
+        existing = next(
+            (
+                item
+                for item in routes
+                if isinstance(item, dict)
+                and _normalized_model_id(str(item.get("model_id") or ""))
+                == _normalized_model_id(model_id)
+                and str(item.get("profile_id") or "") == profile_id
+            ),
+            None,
+        )
+        if existing is None:
+            routes.append(
+                {
+                    "model_id": model_id,
+                    "profile_id": profile_id,
+                    "profile_name": profile_name,
+                    "upstream_host": upstream_host,
+                    "hit_count": 1,
+                    "first_seen_at": now_text,
+                    "last_seen_at": now_text,
+                }
+            )
+        else:
+            existing["profile_name"] = profile_name
+            existing["upstream_host"] = upstream_host
+            existing["hit_count"] = max(0, int(existing.get("hit_count") or 0)) + 1
+            existing["last_seen_at"] = now_text
+
+        store["version"] = 1
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(".json.tmp")
+        try:
+            temp_path.write_text(
+                json.dumps(store, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temp_path, path)
+        except OSError:
+            return False
+    return True
+
+
+def install_routing_telemetry() -> None:
+    """Attach a LiteLLM callback after deployment selection and before the API call."""
+
+    import litellm
+    from litellm.integrations.custom_logger import CustomLogger
+
+    if getattr(litellm, "_ccg_routing_telemetry", False):
+        return
+
+    class RoutingTelemetryCallback(CustomLogger):
+        def log_pre_api_call(self, model: str, messages: Any, kwargs: dict[str, Any]):
+            _record_routing_event(kwargs)
+
+        async def async_log_pre_api_call(
+            self, model: str, messages: Any, kwargs: dict[str, Any]
+        ):
+            _record_routing_event(kwargs)
+
+    callback = RoutingTelemetryCallback(turn_off_message_logging=True)
+    litellm.logging_callback_manager.add_litellm_callback(callback)
+    litellm._ccg_routing_telemetry = True
+    litellm._ccg_routing_telemetry_callback = callback
+
+
 def _build_runtime_config(
     base_config: dict[str, Any], routing: dict[str, Any], pool: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -130,6 +280,12 @@ def _build_runtime_config(
             params["weight"] = max(1, min(100, int(profile.get("routing_weight", 1))))
             model_info = deployment.setdefault("model_info", {})
             model_info["id"] = _deployment_id(str(profile.get("id") or profile_index), model_name)
+            model_info["ccg_profile_id"] = str(profile.get("id") or profile_index)
+            model_info["ccg_profile_name"] = str(profile.get("name") or profile_index)
+            model_info["ccg_model_id"] = str(profile.get("model_id") or litellm_model)
+            model_info["ccg_upstream_host"] = (
+                urlsplit(str(profile.get("base_url") or "")).hostname or "unknown-upstream"
+            )
             deployments.append(deployment)
 
     runtime = copy.deepcopy(base_config)

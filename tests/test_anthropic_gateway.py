@@ -96,6 +96,8 @@ def main() -> None:
             "CLAUDE_UPSTREAM_MODEL": "custom_openai/mock-model",
             "UPSTREAM_BASE_URL": f"http://127.0.0.1:{upstream_port}/v1",
             "UPSTREAM_API_KEY": "test-key",
+            # Never let a developer's real .gateway/models.json escape this mock test.
+            "CCG_DISABLE_MULTI_ACCOUNT_ROUTING": "1",
         }
     )
     startup = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -186,6 +188,12 @@ def main() -> None:
         ).decode("utf-8")
         assert "content_block_delta" in stream
         assert "mock stream ok" in stream
+    except Exception:
+        gateway_log.flush()
+        upstream_log.flush()
+        print(f"GATEWAY_LOG:\n{log_tail(gateway_log_path)}", file=sys.stderr)
+        print(f"UPSTREAM_LOG:\n{log_tail(upstream_log_path)}", file=sys.stderr)
+        raise
     finally:
         for process in (gateway, upstream):
             if process.poll() is None:
