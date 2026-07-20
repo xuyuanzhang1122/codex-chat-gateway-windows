@@ -44,7 +44,7 @@ import {
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { InputNumber, Switch } from "antd";
 import { api } from "./api";
@@ -576,8 +576,7 @@ function App() {
                     onLogs={async () => {
                       beginAction("logs", "打开日志目录…");
                       try {
-                        const dir = await api.logsDir();
-                        await openPath(dir);
+                        const dir = await api.openLogsDir();
                         showFeedback({ key: "logs", state: "ok", message: "已打开日志目录" });
                         pendingKey.current = null;
                         pushLog("OK", `日志目录 ${dir}`);

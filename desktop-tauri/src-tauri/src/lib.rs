@@ -15,6 +15,7 @@ use models::{
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tauri_plugin_opener::OpenerExt;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
@@ -204,6 +205,17 @@ fn gateway_check(app: AppHandle, state: State<'_, AppState>) -> ActionResult {
 #[tauri::command]
 fn get_logs_dir() -> Result<String, String> {
     open_logs_folder()
+}
+
+#[tauri::command]
+fn open_logs_dir(app: AppHandle) -> Result<String, String> {
+    let dir = open_logs_folder()?;
+    // Use the opener's Rust API here: the JS `openPath` command enforces the
+    // capability scope, which does not cover the project install directory.
+    app.opener()
+        .open_path(&dir, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    Ok(dir)
 }
 
 #[tauri::command]
@@ -505,6 +517,7 @@ pub fn run() {
             gateway_restart,
             gateway_check,
             get_logs_dir,
+            open_logs_dir,
             toggle_autostart,
             run_script,
             show_main_window,

@@ -45,6 +45,7 @@ export const api = {
   restart: () => invoke<void>("gateway_restart"),
   check: () => invoke<ActionResult>("gateway_check"),
   logsDir: () => invoke<string>("get_logs_dir"),
+  openLogsDir: () => invoke<string>("open_logs_dir"),
   toggleAutostart: (enable: boolean) => invoke<string>("toggle_autostart", { enable }),
   runScript: (name: string) => invoke<ActionResult>("run_script", { name }),
 };
