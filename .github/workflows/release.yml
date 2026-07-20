@@ -167,6 +167,17 @@ jobs:
                 $uploaded = $true
                 break
               }
+              # The upload endpoint can return 502/503 after storing the file.
+              # Verify by name before treating the attempt as failed.
+              $assetJson = gh release view $tag --json assets 2>$null
+              if ($LASTEXITCODE -eq 0) {
+                $assetNames = @((ConvertFrom-Json $assetJson).assets | ForEach-Object name)
+                if ($assetNames -contains ([System.IO.Path]::GetFileName($file))) {
+                  Write-Host "Upload response failed, but GitHub reports the asset present"
+                  $uploaded = $true
+                  break
+                }
+              }
               if ($attempt -lt 5) { Start-Sleep -Seconds ([Math]::Min(30, 5 * $attempt)) }
             }
             if (-not $uploaded) { throw "Unable to upload $file after retries" }
@@ -281,6 +292,15 @@ jobs:
               if ($LASTEXITCODE -eq 0) {
                 $uploaded = $true
                 break
+              }
+              $assetJson = gh release view $tag --json assets 2>$null
+              if ($LASTEXITCODE -eq 0) {
+                $assetNames = @((ConvertFrom-Json $assetJson).assets | ForEach-Object name)
+                if ($assetNames -contains ([System.IO.Path]::GetFileName($file))) {
+                  Write-Host "Upload response failed, but GitHub reports the asset present"
+                  $uploaded = $true
+                  break
+                }
               }
               if ($attempt -lt 5) { Start-Sleep -Seconds ([Math]::Min(30, 5 * $attempt)) }
             }
