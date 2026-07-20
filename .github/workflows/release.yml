@@ -127,18 +127,49 @@ jobs:
           Write-Host "Uploading:"
           $files | ForEach-Object { Write-Host "  $_" }
 
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag @files --clobber
+          $version = $tag -replace '^v',''
+          $releaseNotesPath = "docs/RELEASE_v$version.md"
+          if (Test-Path -LiteralPath $releaseNotesPath) {
+            $notes = Get-Content -LiteralPath $releaseNotesPath -Raw
           } else {
-            $version = $tag -replace '^v',''
-            $releaseNotesPath = "docs/RELEASE_v$version.md"
-            if (Test-Path -LiteralPath $releaseNotesPath) {
-              $notes = Get-Content -LiteralPath $releaseNotesPath -Raw
-            } else {
-              $notes = "Codex Chat Gateway Studio $tag`n`n" + (./scripts/release-notes.ps1 -Version $version)
+            $notes = "Codex Chat Gateway Studio $tag`n`n" + (./scripts/release-notes.ps1 -Version $version)
+          }
+
+          $releaseReady = $false
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            gh release view $tag *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $releaseReady = $true
+              break
             }
-            gh release create $tag @files --title "Codex Chat Gateway Studio $tag" --notes $notes
+            Write-Host "Create release attempt $attempt of 5"
+            gh release create $tag --title "Codex Chat Gateway Studio $tag" --notes $notes
+            if ($LASTEXITCODE -eq 0) {
+              $releaseReady = $true
+              break
+            }
+            # Another parallel job may have created it after our view failed.
+            gh release view $tag *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $releaseReady = $true
+              break
+            }
+            if ($attempt -lt 5) { Start-Sleep -Seconds ([Math]::Min(30, 5 * $attempt)) }
+          }
+          if (-not $releaseReady) { throw "Unable to create or find release $tag after retries" }
+
+          foreach ($file in $files) {
+            $uploaded = $false
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+              Write-Host "Upload $file attempt $attempt of 5"
+              gh release upload $tag $file --clobber
+              if ($LASTEXITCODE -eq 0) {
+                $uploaded = $true
+                break
+              }
+              if ($attempt -lt 5) { Start-Sleep -Seconds ([Math]::Min(30, 5 * $attempt)) }
+            }
+            if (-not $uploaded) { throw "Unable to upload $file after retries" }
           }
 
   legacy-portable-windows-x64:
@@ -210,22 +241,48 @@ jobs:
             Write-Host "No legacy files to upload"
             exit 0
           }
-          # The Studio job publishes the release, but both jobs run in parallel and
-          # this job usually finishes first — so create the release here if it is
-          # missing instead of racing a wait loop against the other job.
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -ne 0) {
-            $version = $tag -replace '^v',''
-            $releaseNotesPath = "docs/RELEASE_v$version.md"
-            if (Test-Path -LiteralPath $releaseNotesPath) {
-              $notes = Get-Content -LiteralPath $releaseNotesPath -Raw
-            } else {
-              $notes = "Codex Chat Gateway Studio $tag`n`n" + (./scripts/release-notes.ps1 -Version $version)
-            }
-            gh release create $tag --title "Codex Chat Gateway Studio $tag" --notes $notes
-            if ($LASTEXITCODE -ne 0) {
-              # Lost the race with the Studio job between view and create; that is fine.
-              Write-Host 'Release was created concurrently; continuing with upload.'
-            }
+          $version = $tag -replace '^v',''
+          $releaseNotesPath = "docs/RELEASE_v$version.md"
+          if (Test-Path -LiteralPath $releaseNotesPath) {
+            $notes = Get-Content -LiteralPath $releaseNotesPath -Raw
+          } else {
+            $notes = "Codex Chat Gateway Studio $tag`n`n" + (./scripts/release-notes.ps1 -Version $version)
           }
-          gh release upload $tag @files --clobber
+
+          # Both jobs run in parallel, so either one must tolerate the other
+          # creating the release between the view and create calls.
+          $releaseReady = $false
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            gh release view $tag *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $releaseReady = $true
+              break
+            }
+            Write-Host "Create release attempt $attempt of 5"
+            gh release create $tag --title "Codex Chat Gateway Studio $tag" --notes $notes
+            if ($LASTEXITCODE -eq 0) {
+              $releaseReady = $true
+              break
+            }
+            gh release view $tag *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $releaseReady = $true
+              break
+            }
+            if ($attempt -lt 5) { Start-Sleep -Seconds ([Math]::Min(30, 5 * $attempt)) }
+          }
+          if (-not $releaseReady) { throw "Unable to create or find release $tag after retries" }
+
+          foreach ($file in $files) {
+            $uploaded = $false
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+              Write-Host "Upload $file attempt $attempt of 5"
+              gh release upload $tag $file --clobber
+              if ($LASTEXITCODE -eq 0) {
+                $uploaded = $true
+                break
+              }
+              if ($attempt -lt 5) { Start-Sleep -Seconds ([Math]::Min(30, 5 * $attempt)) }
+            }
+            if (-not $uploaded) { throw "Unable to upload $file after retries" }
+          }
