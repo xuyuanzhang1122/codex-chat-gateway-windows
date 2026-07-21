@@ -82,18 +82,27 @@ jobs:
           ./scripts/build-tauri-installer.ps1 -InnoCompiler $env:ISCC
 
       - name: Build signed updater artifacts
-        # Non-blocking: Studio Setup must still ship if signing/NSIS updater fails.
-        continue-on-error: true
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            if ($env:GITHUB_REF -like 'refs/tags/*') {
+              throw "TAURI_SIGNING_PRIVATE_KEY is required for a tagged Studio release"
+            }
             Write-Host "TAURI_SIGNING_PRIVATE_KEY not set; skip updater artifacts"
             exit 0
           }
           ./scripts/build-updater-artifacts.ps1
+          if ($LASTEXITCODE -ne 0) { throw "build-updater-artifacts.ps1 failed: $LASTEXITCODE" }
+          $manifest = Get-Content dist-installer/latest.json -Raw | ConvertFrom-Json
+          $platform = $manifest.platforms.'windows-x86_64'
+          $expectedName = "CodexChatGateway-Studio-Setup-v$($manifest.version).exe"
+          if (-not $platform.signature) { throw "latest.json has no installer signature" }
+          if ($platform.url -notlike "*/$expectedName") {
+            throw "latest.json must point to the full Studio installer: $($platform.url)"
+          }
 
       - name: Upload Studio artifacts
         uses: actions/upload-artifact@v4
@@ -102,7 +111,7 @@ jobs:
           path: |
             dist-installer/CodexChatGateway-Studio-Setup-v*.exe
             dist-installer/CodexChatGateway-Studio-Setup-v*.exe.sha256
-            dist-installer/CodexChatGateway-Studio-Updater-*
+            dist-installer/CodexChatGateway-Studio-Setup-v*.exe.sig
             dist-installer/latest.json
           if-no-files-found: error
 
@@ -118,7 +127,7 @@ jobs:
               Where-Object {
                 $_.Name -like 'CodexChatGateway-Studio-Setup-v*.exe' -or
                 $_.Name -like 'CodexChatGateway-Studio-Setup-v*.exe.sha256' -or
-                $_.Name -like 'CodexChatGateway-Studio-Updater-*' -or
+                $_.Name -like 'CodexChatGateway-Studio-Setup-v*.exe.sig' -or
                 $_.Name -eq 'latest.json'
               } |
               ForEach-Object FullName
@@ -159,6 +168,17 @@ jobs:
             if ($attempt -lt 5) { Start-Sleep -Seconds ([Math]::Min(30, 5 * $attempt)) }
           }
           if (-not $releaseReady) { throw "Unable to create or find release $tag after retries" }
+
+          gh release edit $tag --title $releaseTitle --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw "Unable to refresh release title and notes for $tag" }
+
+          $releaseAssets = @((gh release view $tag --json assets | ConvertFrom-Json).assets)
+          $obsoleteAssets = @($releaseAssets | Where-Object { $_.name -like 'CodexChatGateway-Studio-Updater-*' })
+          foreach ($asset in $obsoleteAssets) {
+            Write-Host "Removing obsolete bare-console updater asset: $($asset.name)"
+            gh release delete-asset $tag $asset.name --yes
+            if ($LASTEXITCODE -ne 0) { throw "Unable to remove obsolete asset $($asset.name)" }
+          }
 
           foreach ($file in $files) {
             $uploaded = $false

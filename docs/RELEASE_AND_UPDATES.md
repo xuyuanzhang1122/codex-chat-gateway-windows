@@ -4,8 +4,8 @@
 
 | 产物 | 命令 | 说明 |
 |---|---|---|
-| **Studio 安装包**（推荐） | `.\构建Studio安装器.bat` 或 `.\scripts\build-tauri-installer.ps1` | **Tauri + LobeHub** 控制台 + LiteLLM runtime，可选卸载旧 C# 版 |
-| **Studio 自动更新包** | `.\scripts\build-updater-artifacts.ps1` | 签名 NSIS zip + `latest.json`（应用内检查更新） |
+| **Studio 安装包**（推荐） | `.\构建Studio安装器.bat` 或 `.\scripts\build-tauri-installer.ps1` | Tauri 控制台 + LiteLLM runtime，升级时可清理旧程序并保留配置 |
+| **Studio 更新清单** | `.\scripts\build-updater-artifacts.ps1` | 对完整 Studio 安装包签名并生成 `latest.json` |
 | 旧便携包 / 旧安装包 | `build-portable.ps1` / `build-installer.ps1` | **仅遗留 C#/WPF**，不要当 Studio 用 |
 
 ### 如何确认是 Studio 而不是旧版
@@ -55,12 +55,12 @@ dist-installer/CodexChatGateway-Studio-Setup-vX.Y.Z.exe.sha256
 |------|------|
 | `push` / `PR` → `main` | 构建 **Studio 安装包**，上传 Actions Artifact；遗留便携包 job 失败不阻断 |
 | 推送标签 `vX.Y.Z`（须与 `VERSION` 一致） | 创建/更新 GitHub Release 并上传 Studio 产物 |
-| 仓库 Secret `TAURI_SIGNING_PRIVATE_KEY` 已配置 | 额外构建签名更新包 + `latest.json` 并挂到 Release |
+| 仓库 Secret `TAURI_SIGNING_PRIVATE_KEY` 已配置 | 为完整 Studio 安装包生成签名与 `latest.json` 并挂到 Release |
 
 发布者只需：
 
 ```powershell
-# 1) VERSION / tauri.conf.json / package.json 已对齐
+# 1) 更新根目录 VERSION；构建会同步其余版本字段
 git push origin main
 $version = Get-Content .\VERSION
 git tag "v$version"
@@ -87,23 +87,21 @@ Release 附件：
 
 | 文件 | 用途 |
 |---|---|
-| `CodexChatGateway-Studio-Setup-vX.Y.Z.exe` | 完整安装 |
-| 同名 `.sha256` | 校验 |
-| `CodexChatGateway-Studio-Updater-vX.Y.Z-windows-x86_64.nsis.zip` | 应用内更新载荷 |
-| 同名 `.sig` / `.sha256` | 签名与校验 |
+| `CodexChatGateway-Studio-Setup-vX.Y.Z.exe` | 完整安装，也是应用内更新唯一允许下载的载荷 |
+| 同名 `.sha256` / `.sig` | SHA-256 校验与更新清单签名 |
 | **`latest.json`** | 更新清单（文件名固定，挂在 latest Release） |
 
 `latest.json` 由构建脚本生成，示意：
 
 ```json
 {
-  "version": "1.3.1",
+  "version": "2.0.0",
   "notes": "…",
   "pub_date": "2026-07-18T12:00:00Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "<minisign signature>",
-      "url": "https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/download/v1.3.1/CodexChatGateway-Studio-Updater-v1.3.1-windows-x86_64.nsis.zip"
+      "url": "https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/download/v2.0.0/CodexChatGateway-Studio-Setup-v2.0.0.exe"
     }
   }
 }
@@ -130,6 +128,7 @@ https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/latest/do
 | 启动 | 静默检查一次；有新版本仅写日志，不自动下载 |
 | 用户数据 | **不修改** `.gateway/models.json` 与 API Key |
 | 网关进程 | 更新控制台不会默认停止网关 |
+| 下载载荷 | 仅完整 Studio（Inno）安装包；不使用只含控制台的 Tauri NSIS 包 |
 
 ### 首次生成密钥
 
@@ -148,4 +147,4 @@ https://github.com/xuyuanzhang1122/codex-chat-gateway-windows/releases/latest/do
 
 ### 开发机注意
 
-`tauri dev` 通常无法完整走安装式更新；请用 **安装版 / NSIS 包** 验证「检查更新」。无网络或尚未上传 `latest.json` 时，检查会提示不可用或已是最新。
+`tauri dev` 通常无法完整走安装式更新；请用 **Studio 安装版** 验证「检查更新」。无网络或尚未上传 `latest.json` 时，检查会提示不可用或已是最新。

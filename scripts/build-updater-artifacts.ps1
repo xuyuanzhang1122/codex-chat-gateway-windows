@@ -1,11 +1,10 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ReleaseBaseUrl = '',
-    [string]$Notes = '',
-    [switch]$SkipBuild
+    [string]$Notes = ''
 )
 
-# Build signed Tauri updater artifacts + latest.json for GitHub Releases.
+# Sign the full Studio (Inno) installer and build latest.json for GitHub Releases.
 # Requires TAURI_SIGNING_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY_PATH.
 # Private keys must NEVER be committed to the repository.
 
@@ -33,8 +32,9 @@ if (-not $OutputDirectory) {
     $OutputDirectory = Join-Path $projectRoot 'dist-installer'
 }
 $outputRoot = [IO.Path]::GetFullPath($OutputDirectory)
-$projectPath = [IO.Path]::GetFullPath($projectRoot)
-if (-not $outputRoot.StartsWith($projectPath, [StringComparison]::OrdinalIgnoreCase)) {
+$projectPath = [IO.Path]::GetFullPath($projectRoot).TrimEnd('\')
+$projectPrefix = $projectPath + '\'
+if (-not $outputRoot.StartsWith($projectPrefix, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'OutputDirectory must be inside the project directory.'
 }
 
@@ -83,101 +83,78 @@ Write-Host ''
 
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 
-if (-not $SkipBuild) {
+$installerName = "CodexChatGateway-Studio-Setup-v$version.exe"
+$installerPath = Join-Path $outputRoot $installerName
+if (-not (Test-Path -LiteralPath $installerPath)) {
+    throw "Full Studio installer is missing: $installerPath. Run build-tauri-installer.ps1 first."
+}
+
+if (-not (Test-Path -LiteralPath (Join-Path $tauriDir 'node_modules'))) {
     Push-Location $tauriDir
     try {
-        if (-not (Test-Path -LiteralPath (Join-Path $tauriDir 'node_modules'))) {
-            Write-Host 'npm install...'
-            npm install
-            if ($LASTEXITCODE -ne 0) { throw 'npm install failed.' }
-        }
-        Write-Host 'tauri build (NSIS + updater artifacts)...'
-        # Bundle NSIS so createUpdaterArtifacts emits .nsis.zip + .sig
-        npm run tauri build
-        if ($LASTEXITCODE -ne 0) { throw 'tauri build failed.' }
+        Write-Host 'npm install...'
+        npm install
+        if ($LASTEXITCODE -ne 0) { throw 'npm install failed.' }
     }
     finally {
         Pop-Location
     }
 }
 
-$bundleRoot = Join-Path $tauriDir 'src-tauri\target\release\bundle'
-if (-not (Test-Path -LiteralPath $bundleRoot)) {
-    throw "Bundle directory not found: $bundleRoot"
+$hasKeyText = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)
+$hasKeyPath = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PATH)
+if ($hasKeyText -and $hasKeyPath) {
+    throw 'Set only one of TAURI_SIGNING_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY_PATH.'
+}
+$signingKeyPath = ''
+if ($hasKeyPath) {
+    $signingKeyPath = $env:TAURI_SIGNING_PRIVATE_KEY_PATH
+    $env:TAURI_SIGNING_PRIVATE_KEY = $null
+    $env:TAURI_SIGNING_PRIVATE_KEY_PATH = $null
+}
+else {
+    $env:TAURI_SIGNING_PRIVATE_KEY_PATH = $null
+}
+$hasKeyPassword = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)
+if (-not $hasKeyPassword) {
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $null
 }
 
-# Tauri 2 on Windows may emit either:
-#   - *.nsis.zip + .sig  (zipped updater package)
-#   - *-setup.exe + .sig (NSIS installer used as updater payload)
-$allFiles = @(
-    Get-ChildItem -LiteralPath $bundleRoot -Recurse -File -ErrorAction SilentlyContinue
-)
-$sigCandidates = @($allFiles | Where-Object { $_.Extension -eq '.sig' })
-
-$payload = $null
-# 1) Prefer signed NSIS setup.exe (common Tauri 2 output)
-$setupExes = @(
-    $allFiles | Where-Object {
-        $_.Extension -eq '.exe' -and
-        ($_.Name -match 'setup' -or $_.DirectoryName -match 'nsis') -and
-        ($_.Name -notmatch 'uninstall')
-    }
-)
-foreach ($exe in ($setupExes | Sort-Object Length -Descending)) {
-    $sibling = $exe.FullName + '.sig'
-    if (Test-Path -LiteralPath $sibling) {
-        $payload = $exe
-        break
-    }
+$signaturePath = $installerPath + '.sig'
+if (Test-Path -LiteralPath $signaturePath) {
+    Remove-Item -LiteralPath $signaturePath -Force
 }
 
-# 2) Fallback: nsis.zip
-if (-not $payload) {
-    $zips = @(
-        $allFiles | Where-Object {
-            $_.Name -match '\.nsis\.zip$' -or
-            ($_.Extension -eq '.zip' -and $_.Name -match 'nsis|setup|x64')
+Push-Location $tauriDir
+try {
+    Write-Host 'Signing the full Studio (Inno) installer...'
+    if ($signingKeyPath) {
+        if ($hasKeyPassword) {
+            npx tauri signer sign --private-key-path $signingKeyPath $installerPath
         }
-    )
-    foreach ($z in ($zips | Sort-Object Length -Descending)) {
-        $sibling = $z.FullName + '.sig'
-        if (Test-Path -LiteralPath $sibling) {
-            $payload = $z
-            break
+        else {
+            npx tauri signer sign --private-key-path $signingKeyPath --password "" $installerPath
         }
     }
+    else {
+        if ($hasKeyPassword) {
+            npx tauri signer sign $installerPath
+        }
+        else {
+            npx tauri signer sign --password "" $installerPath
+        }
+    }
+    if ($LASTEXITCODE -ne 0) { throw 'Signing the full Studio installer failed.' }
+}
+finally {
+    Pop-Location
 }
 
-if (-not $payload) {
-    throw @"
-No signed updater payload found under $bundleRoot
-Looked for *-setup.exe.sig and *.nsis.zip.sig.
-Ensure createUpdaterArtifacts=true, targets include nsis, and TAURI_SIGNING_PRIVATE_KEY is set.
-"@
+if (-not (Test-Path -LiteralPath $signaturePath)) {
+    throw "Signature file was not created: $signaturePath"
 }
 
-$sigPath = $payload.FullName + '.sig'
-if (-not (Test-Path -LiteralPath $sigPath)) {
-    $sig = $sigCandidates | Where-Object { $_.Name -eq ($payload.Name + '.sig') } | Select-Object -First 1
-    if ($sig) { $sigPath = $sig.FullName }
-}
-if (-not (Test-Path -LiteralPath $sigPath)) {
-    throw "Signature file (.sig) not found for $($payload.FullName)."
-}
-
-$ext = $payload.Extension.ToLowerInvariant()
-if ($ext -eq '.exe') {
-    $outZipName = "CodexChatGateway-Studio-Updater-v$version-windows-x86_64-setup.exe"
-} else {
-    $outZipName = "CodexChatGateway-Studio-Updater-v$version-windows-x86_64.nsis.zip"
-}
-$outSigName = "$outZipName.sig"
-$outZip = Join-Path $outputRoot $outZipName
-$outSig = Join-Path $outputRoot $outSigName
-Copy-Item -LiteralPath $payload.FullName -Destination $outZip -Force
-Copy-Item -LiteralPath $sigPath -Destination $outSig -Force
-
-$signature = (Get-Content -LiteralPath $outSig -Raw).Trim()
+$signature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
 if ([string]::IsNullOrWhiteSpace($signature)) {
     throw 'Signature file is empty.'
 }
@@ -187,7 +164,7 @@ if (-not $Notes) {
     $Notes = "Codex Chat Gateway Studio $version"
 }
 
-$downloadUrl = "$ReleaseBaseUrl/$outZipName"
+$downloadUrl = "$ReleaseBaseUrl/$installerName"
 $latest = [ordered]@{
     version  = $version
     notes    = $Notes
@@ -203,18 +180,22 @@ $latest = [ordered]@{
 $latestPath = Join-Path $outputRoot 'latest.json'
 $latest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $latestPath -Encoding utf8
 
-$shaZip = Get-Sha256Hash -Path $outZip
-Set-Content -LiteralPath ($outZip + '.sha256') -Value "$shaZip  $outZipName" -Encoding ascii
+$shaInstaller = Get-Sha256Hash -Path $installerPath
+Set-Content -LiteralPath ($installerPath + '.sha256') -Value "$shaInstaller  $installerName" -Encoding ascii
+
+# Remove obsolete bare-console updater outputs from local build directories.
+Get-ChildItem -LiteralPath $outputRoot -Filter "CodexChatGateway-Studio-Updater-v$version*" -File -ErrorAction SilentlyContinue |
+    Remove-Item -Force
 
 Write-Host ''
 Write-Host 'Updater artifacts ready:' -ForegroundColor Green
-Write-Host "  $outZip"
-Write-Host "  $outSig"
+Write-Host "  $installerPath"
+Write-Host "  $signaturePath"
 Write-Host "  $latestPath"
 Write-Host ''
 Write-Host 'Upload to GitHub Release (same tag as VERSION):'
-Write-Host "  $outZipName"
-Write-Host "  $outSigName"
+Write-Host "  $installerName"
+Write-Host "  $installerName.sig"
 Write-Host '  latest.json'
 Write-Host ''
 Write-Host 'Endpoint used by the app:'
