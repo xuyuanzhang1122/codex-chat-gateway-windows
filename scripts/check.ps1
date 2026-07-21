@@ -16,6 +16,6 @@ try {
     Write-Host 'Basic checks passed. Test an actual Responses request after restarting Codex.'
 } catch {
     Write-Host 'Gateway check failed: the local gateway is not reachable or not ready.'
-    Write-Host 'Run start-gateway.bat, then retry this check.'
+    Write-Host 'Open Codex Chat Gateway Studio, start the gateway, then retry this check.'
     exit 1
 }

@@ -8,6 +8,7 @@ logs/
 dist-portable/
 dist/
 dist-installer/
+.tmp-release-*/
 runtime/
 CodexChatGateway.exe
 desktop/*.exe

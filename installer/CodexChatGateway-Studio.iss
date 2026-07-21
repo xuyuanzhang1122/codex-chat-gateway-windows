@@ -79,12 +79,9 @@ english.LaunchAfterInstall=Open Codex Chat Gateway Studio
 english.PurgePrompt=Also remove saved model keys, logs, and local settings?%n%nChoose No to keep them for a future reinstall.
 english.SetupRunning=Codex Chat Gateway is currently open. Exit the console from the tray menu, then run Setup again.
 english.BrandKicker=STUDIO  /  LOCAL MODEL BRIDGE
-english.LegacyGroup=Previous installation
-english.RemoveLegacy=Uninstall / remove the previous C# desktop edition first
-english.RemoveLegacyHint=Stops the old gateway process, runs the previous uninstaller when found, and cleans the legacy install folder before installing Studio.
-english.LegacyRemoved=Previous C# edition cleanup finished.
-english.LegacyNotFound=No previous C# edition was found (or it was already removed).
-english.LegacyFailed=Could not fully remove the previous edition. You can continue installing Studio.
+english.CleanupGroup=Previous installation
+english.CleanPrevious=Remove previous program files and unrelated leftovers
+english.CleanPreviousHint=Keeps .gateway model settings, API keys, .env and logs. The previous gateway is stopped so its runtime can be replaced safely.
 chinesesimplified.SetupWindowTitle=安装 Codex Chat Gateway Studio
 chinesesimplified.WelcomeHeading=Studio 控制台 · 本机模型桥
 chinesesimplified.WelcomeBody=安装 Tauri 桌面控制台、LiteLLM 运行时与脚本。%n%n• 仅监听 127.0.0.1%n• 密钥只保存在本机%n• 关闭窗口仅到托盘，不停止网关
@@ -97,12 +94,9 @@ chinesesimplified.LaunchAfterInstall=打开 Codex Chat Gateway Studio
 chinesesimplified.PurgePrompt=是否同时删除已保存的模型密钥、日志和本地设置？%n%n选择“否”可保留这些数据，方便以后重新安装。
 chinesesimplified.SetupRunning=Codex Chat Gateway 正在运行。请从托盘菜单退出控制台后重新运行安装程序。
 chinesesimplified.BrandKicker=STUDIO  /  LOCAL MODEL BRIDGE
-chinesesimplified.LegacyGroup=旧版本
-chinesesimplified.RemoveLegacy=安装前卸载 / 删除旧版 C# 桌面程序
-chinesesimplified.RemoveLegacyHint=先停止旧网关进程，运行旧版卸载程序（若存在），并清理旧安装目录，再安装 Studio。
-chinesesimplified.LegacyRemoved=旧版 C# 清理完成。
-chinesesimplified.LegacyNotFound=未检测到旧版 C# 安装（或已清理）。
-chinesesimplified.LegacyFailed=旧版未能完全清理，可继续安装 Studio。
+chinesesimplified.CleanupGroup=旧版本清理
+chinesesimplified.CleanPrevious=删除以前版本的程序及无关文件
+chinesesimplified.CleanPreviousHint=保留 .gateway 模型配置、API 密钥、.env 和日志。安装时会停止旧网关，以便安全替换运行时。
 
 [Messages]
 english.SetupAppRunningError={cm:SetupRunning}
@@ -111,13 +105,27 @@ chinesesimplified.SetupAppRunningError={cm:SetupRunning}
 [Tasks]
 Name: "desktopicon"; Description: "{cm:DesktopShortcut}"; GroupDescription: "{cm:ShortcutGroup}:"; Flags: unchecked
 Name: "autostart"; Description: "{cm:AutostartShortcut}"; GroupDescription: "{cm:ShortcutGroup}:"; Flags: unchecked
-Name: "removelegacy"; Description: "{cm:RemoveLegacy}"; GroupDescription: "{cm:LegacyGroup}:"; Flags: checkedonce
+Name: "cleanprevious"; Description: "{cm:CleanPrevious}"; GroupDescription: "{cm:CleanupGroup}:"; Flags: checkedonce
 
 [InstallDelete]
 ; Replace runtime/scripts trees cleanly on upgrade
 Type: filesandordirs; Name: "{app}\runtime"
 Type: filesandordirs; Name: "{app}\scripts"
-Type: filesandordirs; Name: "{app}\patches"
+Type: filesandordirs; Name: "{app}\patches"; Check: ShouldCleanPreviousFiles
+Type: filesandordirs; Name: "{app}\docs"; Check: ShouldCleanPreviousFiles
+Type: filesandordirs; Name: "{app}\bin"; Check: ShouldCleanPreviousFiles
+Type: filesandordirs; Name: "{app}\desktop"; Check: ShouldCleanPreviousFiles
+Type: filesandordirs; Name: "{app}\examples"; Check: ShouldCleanPreviousFiles
+Type: filesandordirs; Name: "{app}\installer"; Check: ShouldCleanPreviousFiles
+Type: filesandordirs; Name: "{app}\tests"; Check: ShouldCleanPreviousFiles
+Type: filesandordirs; Name: "{app}\__pycache__"; Check: ShouldCleanPreviousFiles
+Type: files; Name: "{app}\*.bat"; Check: ShouldCleanPreviousFiles
+Type: files; Name: "{app}\.gitignore"; Check: ShouldCleanPreviousFiles
+Type: files; Name: "{app}\AGENTS.md"; Check: ShouldCleanPreviousFiles
+Type: files; Name: "{app}\CHANGELOG.md"; Check: ShouldCleanPreviousFiles
+Type: files; Name: "{app}\README.md"; Check: ShouldCleanPreviousFiles
+Type: files; Name: "{app}\README.zh-CN.md"; Check: ShouldCleanPreviousFiles
+Type: files; Name: "{app}\requirements.txt"; Check: ShouldCleanPreviousFiles
 Type: files; Name: "{app}\CodexChatGateway.exe"
 Type: files; Name: "{app}\codex-chat-gateway-desktop.exe"
 Type: files; Name: "{app}\run_gateway.py"
@@ -130,7 +138,7 @@ Source: "CHINESE_TRANSLATION_LICENSE.txt"; DestDir: "{app}\licenses"; DestName: 
 [Icons]
 Name: "{autoprograms}\Codex Chat Gateway"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}"
 Name: "{autodesktop}\Codex Chat Gateway"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}"; Tasks: desktopicon
-Name: "{userstartup}\Codex Chat Gateway"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\start-background.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}"; Tasks: autostart
+Name: "{userstartup}\Codex Chat Gateway"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\start-background.ps1"" -NonInteractive"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}"; Tasks: autostart
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchAfterInstall}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
@@ -146,7 +154,7 @@ Type: files; Name: "{app}\.env"; Check: ShouldPurgeUserData
 [Code]
 var
   BrandKicker: TNewStaticText;
-  LegacyHint: TNewStaticText;
+  CleanupHint: TNewStaticText;
   PurgeUserData: Boolean;
 
 procedure InitializeWizard;
@@ -168,101 +176,44 @@ begin
   BrandKicker.Left := WizardForm.WelcomeLabel1.Left;
   BrandKicker.Top := WizardForm.WelcomeLabel1.Top - ScaleY(28);
 
-  LegacyHint := TNewStaticText.Create(WizardForm);
-  LegacyHint.Parent := WizardForm.SelectTasksPage;
-  LegacyHint.Caption := ExpandConstant('{cm:RemoveLegacyHint}');
-  LegacyHint.Font.Name := 'Segoe UI';
-  LegacyHint.Font.Size := 8;
-  LegacyHint.WordWrap := True;
-  LegacyHint.AutoSize := False;
-  LegacyHint.Width := WizardForm.TasksList.Width;
-  LegacyHint.Height := ScaleY(40);
-  LegacyHint.Left := WizardForm.TasksList.Left;
-  LegacyHint.Top := WizardForm.TasksList.Top + WizardForm.TasksList.Height + ScaleY(8);
+  CleanupHint := TNewStaticText.Create(WizardForm);
+  CleanupHint.Parent := WizardForm.SelectTasksPage;
+  CleanupHint.Caption := ExpandConstant('{cm:CleanPreviousHint}');
+  CleanupHint.Font.Name := 'Segoe UI';
+  CleanupHint.Font.Size := 8;
+  CleanupHint.WordWrap := True;
+  CleanupHint.AutoSize := False;
+  CleanupHint.Width := WizardForm.TasksList.Width;
+  CleanupHint.Height := ScaleY(40);
+  CleanupHint.Left := WizardForm.TasksList.Left;
+  CleanupHint.Top := WizardForm.TasksList.Top + WizardForm.TasksList.Height + ScaleY(8);
 end;
 
-function GetUninstallString: String;
-var
-  sUnInstPath: String;
-  sUnInstallString: String;
-begin
-  sUnInstPath := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppIdGuid}_is1';
-  sUnInstallString := '';
-  if not RegQueryStringValue(HKCU, sUnInstPath, 'UninstallString', sUnInstallString) then
-    RegQueryStringValue(HKLM, sUnInstPath, 'UninstallString', sUnInstallString);
-  Result := sUnInstallString;
-end;
-
-function LegacyInstallExists: Boolean;
-var
-  uninst: String;
-  legacyDir: String;
-begin
-  uninst := GetUninstallString();
-  legacyDir := ExpandConstant('{localappdata}\Programs\Codex Chat Gateway');
-  Result := (uninst <> '') or DirExists(legacyDir);
-end;
-
-procedure StopLegacyProcesses;
+procedure StopPreviousProcesses;
 var
   ResultCode: Integer;
 begin
-  { Best-effort: stop known gateway + old desktop console }
+  { Prefer the scoped stop script from the installed copy. }
+  if FileExists(ExpandConstant('{app}\scripts\stop-background.ps1')) then
+    Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' +
+      ExpandConstant('{app}\scripts\stop-background.ps1') + '"',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  { Best-effort cleanup for old desktop editions. }
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM CodexChatGateway.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM codex-chat-gateway-desktop.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-    '-NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match ''run_gateway\.py'' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
-function UninstallLegacyEdition: Boolean;
-var
-  uninst: String;
-  ResultCode: Integer;
-  legacyDir: String;
+function ShouldCleanPreviousFiles: Boolean;
 begin
-  Result := True;
-  StopLegacyProcesses;
-
-  uninst := GetUninstallString();
-  if uninst <> '' then
-  begin
-    uninst := RemoveQuotes(uninst);
-    { Inno uninstaller: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART }
-    if not Exec(uninst, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-      Result := False
-    else if (ResultCode <> 0) and (ResultCode <> 1) then
-      Result := False;
-  end;
-
-  legacyDir := ExpandConstant('{localappdata}\Programs\Codex Chat Gateway');
-  { Preserve .gateway and logs if present — only strip classic WPF binary leftovers when reinstalling into same dir }
-  if FileExists(legacyDir + '\CodexChatGateway.exe') then
-  begin
-    DeleteFile(legacyDir + '\CodexChatGateway.exe');
-  end;
-
-  if not LegacyInstallExists then
-    Log('Legacy install cleaned.')
-  else
-    Log('Legacy install still partially present.');
+  Result := WizardIsTaskSelected('cleanprevious');
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
-  if WizardIsTaskSelected('removelegacy') then
-  begin
-    if LegacyInstallExists then
-    begin
-      if UninstallLegacyEdition then
-        Log(ExpandConstant('{cm:LegacyRemoved}'))
-      else
-        Log(ExpandConstant('{cm:LegacyFailed}'));
-    end
-    else
-      Log(ExpandConstant('{cm:LegacyNotFound}'));
-  end;
+  if WizardIsTaskSelected('cleanprevious') then
+    StopPreviousProcesses;
   NeedsRestart := False;
 end;
 

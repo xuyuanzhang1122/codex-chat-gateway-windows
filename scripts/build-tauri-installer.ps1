@@ -124,14 +124,19 @@ if (Test-Path -LiteralPath (Join-Path $runtimeDir 'python.exe')) {
     Write-Host "Using existing project runtime: $runtimeSource"
 }
 else {
-    if ($SkipRuntimeBootstrap) {
-        throw 'runtime\python.exe is missing. Remove -SkipRuntimeBootstrap or run build-embedded-runtime.ps1 first.'
-    }
     $runtimeSource = Join-Path $outputRoot "studio-runtime-v$version"
-    Write-Host 'Building embedded Python runtime (no C#/WPF desktop)...' -ForegroundColor Yellow
-    & (Join-Path $PSScriptRoot 'build-embedded-runtime.ps1') -DestinationRuntimeDir $runtimeSource
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Embedded runtime build failed.'
+    if (Test-Path -LiteralPath (Join-Path $runtimeSource 'python.exe')) {
+        Write-Host "Using cached versioned runtime: $runtimeSource"
+    }
+    else {
+        if ($SkipRuntimeBootstrap) {
+            throw 'runtime\python.exe and cached versioned runtime are missing. Remove -SkipRuntimeBootstrap or run build-embedded-runtime.ps1 first.'
+        }
+        Write-Host 'Building embedded Python runtime (no C#/WPF desktop)...' -ForegroundColor Yellow
+        & (Join-Path $PSScriptRoot 'build-embedded-runtime.ps1') -DestinationRuntimeDir $runtimeSource
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Embedded runtime build failed.'
+        }
     }
 }
 
@@ -144,12 +149,8 @@ $rootFiles = @(
     'run_gateway.py',
     'gateway_runtime.py',
     'config.yaml',
-    'requirements.txt',
     'VERSION',
     'LICENSE',
-    'AGENTS.md',
-    'README.md',
-    'CHANGELOG.md',
     'THIRD_PARTY_NOTICES.md'
 )
 foreach ($name in $rootFiles) {
@@ -158,37 +159,95 @@ foreach ($name in $rootFiles) {
         Copy-Item -LiteralPath $src -Destination (Join-Path $stage $name) -Force
     }
 }
-foreach ($dir in @('scripts', 'patches', 'docs')) {
-    $src = Join-Path $projectRoot $dir
-    if (Test-Path -LiteralPath $src) {
-        Copy-Item -LiteralPath $src -Destination (Join-Path $stage $dir) -Recurse -Force
+$runtimeScripts = @(
+    'check.ps1',
+    'claude_desktop_config.py',
+    'configure_codex.py',
+    'configure-claude-desktop.ps1',
+    'configure-codex.ps1',
+    'disable-autostart.ps1',
+    'enable-autostart.ps1',
+    'model-store.ps1',
+    'restore_codex.py',
+    'restore-claude-desktop.ps1',
+    'restore-codex.ps1',
+    'start-background.ps1',
+    'stop-background.ps1'
+)
+$stageScripts = Join-Path $stage 'scripts'
+New-Item -ItemType Directory -Path $stageScripts -Force | Out-Null
+foreach ($name in $runtimeScripts) {
+    $src = Join-Path (Join-Path $projectRoot 'scripts') $name
+    if (-not (Test-Path -LiteralPath $src)) {
+        throw "Required Studio runtime script is missing: $name"
     }
+    Copy-Item -LiteralPath $src -Destination (Join-Path $stageScripts $name) -Force
 }
 
 # Main app MUST be Tauri Studio
 $stageExe = Join-Path $stage 'CodexChatGateway.exe'
 Copy-Item -LiteralPath $tauriExe -Destination $stageExe -Force
 Copy-Item -LiteralPath $runtimeSource -Destination (Join-Path $stage 'runtime') -Recurse -Force
+$stageRuntime = Join-Path $stage 'runtime'
+$stageBytecode = @(Get-ChildItem -LiteralPath $stageRuntime -Recurse -File -Filter '*.pyc' -Force -ErrorAction SilentlyContinue)
+foreach ($item in $stageBytecode) {
+    Remove-Item -LiteralPath $item.FullName -Force
+}
+$stageCacheDirectories = @(
+    Get-ChildItem -LiteralPath $stageRuntime -Recurse -Directory -Filter '__pycache__' -Force -ErrorAction SilentlyContinue |
+        Sort-Object { $_.FullName.Length } -Descending
+)
+foreach ($item in $stageCacheDirectories) {
+    if (Test-Path -LiteralPath $item.FullName) {
+        Remove-Item -LiteralPath $item.FullName -Recurse -Force
+    }
+}
 
 $icon = Join-Path $projectRoot 'desktop\assets\gateway-logo.ico'
 if (Test-Path -LiteralPath $icon) {
     Copy-Item -LiteralPath $icon -Destination (Join-Path $stage 'gateway-logo.ico') -Force
 }
 
-$launcher = @(
-    '@echo off'
-    'cd /d "%~dp0"'
-    'start "" "%~dp0CodexChatGateway.exe"'
-) -join "`r`n"
 $utf8 = [Text.UTF8Encoding]::new($false)
-[IO.File]::WriteAllText((Join-Path $stage 'desktop.bat'), $launcher, $utf8)
-[IO.File]::WriteAllText((Join-Path $stage 'Studio.bat'), $launcher, $utf8)
-# Chinese launcher name
-$cnBat = Join-Path $stage ([char]0x684C + [char]0x9762 + [char]0x7248 + '.bat')
-[IO.File]::WriteAllText($cnBat, $launcher, $utf8)
-
 $studioMarker = "Codex Chat Gateway Studio v$version`nUI=Tauri+LobeHub`nhttps://github.com/xuyuanzhang1122/codex-chat-gateway-windows`n"
 [IO.File]::WriteAllText((Join-Path $stage 'STUDIO'), $studioMarker, $utf8)
+
+$unexpectedBatFiles = @(Get-ChildItem -LiteralPath $stage -Recurse -Filter '*.bat' -File -Force)
+if ($unexpectedBatFiles.Count -gt 0) {
+    throw "Studio payload must not contain BAT launchers: $($unexpectedBatFiles.FullName -join ', ')"
+}
+$unexpectedBytecode = @(
+    Get-ChildItem -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq '__pycache__' -or $_.Name -like '*.pyc' }
+)
+if ($unexpectedBytecode.Count -gt 0) {
+    throw "Studio payload must not contain Python bytecode caches: $($unexpectedBytecode.FullName -join ', ')"
+}
+$allowedTopLevelFiles = @(
+    'CodexChatGateway.exe',
+    'config.yaml',
+    'gateway-logo.ico',
+    'gateway_runtime.py',
+    'LICENSE',
+    'run_gateway.py',
+    'STUDIO',
+    'THIRD_PARTY_NOTICES.md',
+    'VERSION'
+)
+$unexpectedTopLevelFiles = @(
+    Get-ChildItem -LiteralPath $stage -File -Force |
+        Where-Object { $_.Name -notin $allowedTopLevelFiles }
+)
+if ($unexpectedTopLevelFiles.Count -gt 0) {
+    throw "Unexpected top-level Studio payload files: $($unexpectedTopLevelFiles.Name -join ', ')"
+}
+$unexpectedTopLevelDirectories = @(
+    Get-ChildItem -LiteralPath $stage -Directory -Force |
+        Where-Object { $_.Name -notin @('runtime', 'scripts') }
+)
+if ($unexpectedTopLevelDirectories.Count -gt 0) {
+    throw "Unexpected Studio payload directories: $($unexpectedTopLevelDirectories.Name -join ', ')"
+}
 
 $stageSize = (Get-Item -LiteralPath $stageExe).Length
 if ($stageSize -ne $tauriSize) {

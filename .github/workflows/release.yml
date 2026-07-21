@@ -128,6 +128,8 @@ jobs:
           $files | ForEach-Object { Write-Host "  $_" }
 
           $version = $tag -replace '^v',''
+          $releaseTitle = "V$version"
+          if ($version -eq '2.0.0') { $releaseTitle = 'V2.0.0 "Nova"' }
           $releaseNotesPath = "docs/RELEASE_v$version.md"
           if (Test-Path -LiteralPath $releaseNotesPath) {
             $notes = Get-Content -LiteralPath $releaseNotesPath -Raw
@@ -143,7 +145,7 @@ jobs:
               break
             }
             Write-Host "Create release attempt $attempt of 5"
-            gh release create $tag --title "Codex Chat Gateway Studio $tag" --notes $notes
+            gh release create $tag --title $releaseTitle --notes $notes
             if ($LASTEXITCODE -eq 0) {
               $releaseReady = $true
               break
@@ -253,6 +255,8 @@ jobs:
             exit 0
           }
           $version = $tag -replace '^v',''
+          $releaseTitle = "V$version"
+          if ($version -eq '2.0.0') { $releaseTitle = 'V2.0.0 "Nova"' }
           $releaseNotesPath = "docs/RELEASE_v$version.md"
           if (Test-Path -LiteralPath $releaseNotesPath) {
             $notes = Get-Content -LiteralPath $releaseNotesPath -Raw
@@ -270,7 +274,7 @@ jobs:
               break
             }
             Write-Host "Create release attempt $attempt of 5"
-            gh release create $tag --title "Codex Chat Gateway Studio $tag" --notes $notes
+            gh release create $tag --title $releaseTitle --notes $notes
             if ($LASTEXITCODE -eq 0) {
               $releaseReady = $true
               break

@@ -17,9 +17,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri_plugin_opener::OpenerExt;
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WindowEvent,
+    AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindowBuilder,
+    WindowEvent,
 };
 
 struct AppState {
@@ -295,6 +295,9 @@ fn run_script(
 
 #[tauri::command]
 fn show_main_window(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(menu) = app.get_webview_window("tray-menu") {
+        let _ = menu.hide();
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -315,6 +318,13 @@ fn hide_main_window(app: AppHandle, state: State<'_, AppState>) -> Result<(), St
     Ok(())
 }
 
+#[tauri::command]
+fn hide_tray_menu(app: AppHandle) {
+    if let Some(window) = app.get_webview_window("tray-menu") {
+        let _ = window.hide();
+    }
+}
+
 /// Quit the desktop console only. Gateway process is left running unless the user
 /// explicitly stops it first (or uses uninstall scripts).
 #[tauri::command]
@@ -327,8 +337,7 @@ pub fn sync_tray(app: &AppHandle, status: &GatewayStatus) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
-    let visible = *state.window_visible.lock();
-    let (phase_label, tip) = tray_status_labels(status);
+    let (_, tip) = tray_status_labels(status);
 
     let tray_guard = state.tray.lock();
     let Some(tray) = tray_guard.as_ref() else {
@@ -337,10 +346,6 @@ pub fn sync_tray(app: &AppHandle, status: &GatewayStatus) {
 
     let _ = tray.set_tooltip(Some(&tip));
 
-    // Rebuild menu so Chinese labels stay in sync with live state.
-    if let Ok(menu) = build_tray_menu(app, &phase_label, visible) {
-        let _ = tray.set_menu(Some(menu));
-    }
 }
 
 fn tray_status_labels(status: &GatewayStatus) -> (String, String) {
@@ -373,33 +378,33 @@ fn tray_status_labels(status: &GatewayStatus) -> (String, String) {
     (menu_status, tip)
 }
 
-fn build_tray_menu(
-    app: &AppHandle,
-    phase_label: &str,
-    window_visible: bool,
-) -> tauri::Result<Menu<tauri::Wry>> {
-    let status_i = MenuItem::with_id(app, "status", phase_label, false, None::<&str>)?;
-    let show_label = if window_visible {
-        "显示控制台（当前已打开）"
-    } else {
-        "显示控制台"
+fn show_tray_menu(app: &AppHandle, cursor: PhysicalPosition<f64>) {
+    let Some(window) = app.get_webview_window("tray-menu") else {
+        return;
     };
-    let hide_label = if window_visible {
-        "隐藏到托盘"
-    } else {
-        "隐藏到托盘（已隐藏）"
-    };
-    let show_i = MenuItem::with_id(app, "show", show_label, true, None::<&str>)?;
-    let hide_i = MenuItem::with_id(app, "hide", hide_label, window_visible, None::<&str>)?;
-    let sep = PredefinedMenuItem::separator(app)?;
-    let quit_i = MenuItem::with_id(
-        app,
-        "quit",
-        "退出控制台（网关继续运行）",
-        true,
-        None::<&str>,
-    )?;
-    Menu::with_items(app, &[&status_i, &sep, &show_i, &hide_i, &sep, &quit_i])
+    let size = window.outer_size().unwrap_or_else(|_| tauri::PhysicalSize::new(292, 286));
+    let mut x = cursor.x.round() as i32 - size.width as i32;
+    let mut y = cursor.y.round() as i32 - size.height as i32 - 8;
+
+    if let Ok(monitors) = window.available_monitors() {
+        if let Some(monitor) = monitors.into_iter().find(|monitor| {
+            let origin = monitor.position();
+            let extent = monitor.size();
+            cursor.x >= origin.x as f64
+                && cursor.x < (origin.x + extent.width as i32) as f64
+                && cursor.y >= origin.y as f64
+                && cursor.y < (origin.y + extent.height as i32) as f64
+        }) {
+            let origin = monitor.position();
+            let extent = monitor.size();
+            x = x.clamp(origin.x + 8, origin.x + extent.width as i32 - size.width as i32 - 8);
+            y = y.clamp(origin.y + 8, origin.y + extent.height as i32 - size.height as i32 - 8);
+        }
+    }
+
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+    let _ = window.show();
+    let _ = window.set_focus();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -409,7 +414,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_process::init())
         .manage(AppState {
             gateway: Arc::clone(&gateway),
             tray: Mutex::new(None),
@@ -426,8 +430,23 @@ pub fn run() {
             gateway.start_watcher(handle.clone());
 
             // System tray: close/minimize-to-tray must not kill the gateway process.
-            let (phase_label, tip) = tray_status_labels(&st0);
-            let menu = build_tray_menu(app.handle(), &phase_label, true)?;
+            let (_, tip) = tray_status_labels(&st0);
+
+            WebviewWindowBuilder::new(
+                app,
+                "tray-menu",
+                WebviewUrl::App("index.html?tray=1".into()),
+            )
+            .title("Codex Chat Gateway")
+            .inner_size(292.0, 286.0)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(true)
+            .visible(false)
+            .build()?;
 
             let tray = TrayIconBuilder::new()
                 .icon(
@@ -435,34 +454,7 @@ pub fn run() {
                         .cloned()
                         .expect("missing window icon"),
                 )
-                .menu(&menu)
                 .tooltip(&tip)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.unminimize();
-                            let _ = w.set_focus();
-                        }
-                        if let Some(state) = app.try_state::<AppState>() {
-                            *state.window_visible.lock() = true;
-                            sync_tray(app, &state.gateway.snapshot());
-                        }
-                    }
-                    "hide" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.hide();
-                        }
-                        if let Some(state) = app.try_state::<AppState>() {
-                            *state.window_visible.lock() = false;
-                            sync_tray(app, &state.gateway.snapshot());
-                        }
-                    }
-                    "quit" => {
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -480,6 +472,14 @@ pub fn run() {
                             *state.window_visible.lock() = true;
                             sync_tray(app, &state.gateway.snapshot());
                         }
+                    } else if let TrayIconEvent::Click {
+                        button: MouseButton::Right,
+                        button_state: MouseButtonState::Up,
+                        position,
+                        ..
+                    } = event
+                    {
+                        show_tray_menu(tray.app_handle(), position);
                     }
                 })
                 .build(app)?;
@@ -491,6 +491,19 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == "tray-menu" {
+                match event {
+                    WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    WindowEvent::Focused(false) => {
+                        let _ = window.hide();
+                    }
+                    _ => {}
+                }
+                return;
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // X button / Alt+F4 → hide to tray; do not stop gateway.
                 api.prevent_close();
@@ -528,6 +541,7 @@ pub fn run() {
             run_script,
             show_main_window,
             hide_main_window,
+            hide_tray_menu,
             quit_console,
             updater::download_studio_installer,
         ])

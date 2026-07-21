@@ -25,6 +25,31 @@ $patterns = @(
     'polars_runtime_32-*.dist-info',
     'granian',
     'granian-*.dist-info',
+    'bin',
+    'pythonwin',
+    'numpy',
+    'numpy.libs',
+    'numpy-*.dist-info',
+    'hf_xet',
+    'hf_xet-*.dist-info',
+    'mcp',
+    'mcp-*.dist-info',
+    'gunicorn',
+    'gunicorn-*.dist-info',
+    'rq',
+    'rq-*.dist-info',
+    'win32',
+    'win32com',
+    'win32comext',
+    'adodbapi',
+    'isapi',
+    'PyWin32.chm',
+    'pythoncom.py',
+    'pywintypes.py',
+    'pywin32_system32',
+    'pywin32-*.dist-info',
+    'pywin32.pth',
+    'pywin32.version.txt',
     'azure',
     'azure_*.dist-info',
     'soundfile.py',
@@ -54,6 +79,65 @@ foreach ($pattern in $patterns) {
             $removedBytes += [int64]$item.Length
             Remove-Item -LiteralPath $fullPath -Force
         }
+    }
+}
+
+# Wheel test suites and development fixtures are never imported by the
+# gateway. Remove deepest paths first so nested test directories are counted
+# once and cannot leave empty parent fixtures behind.
+$testDirectories = @(
+    Get-ChildItem -LiteralPath $sitePackages -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq 'test' -or $_.Name -eq 'tests' } |
+        Sort-Object { $_.FullName.Length } -Descending
+)
+foreach ($item in $testDirectories) {
+    if (-not (Test-Path -LiteralPath $item.FullName)) {
+        continue
+    }
+    $fullPath = [IO.Path]::GetFullPath($item.FullName)
+    if (-not $fullPath.StartsWith($siteRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to prune test path outside site-packages: $fullPath"
+    }
+    $measure = Get-ChildItem -LiteralPath $fullPath -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum
+    $removedFiles += $measure.Count
+    $removedBytes += [int64]$measure.Sum
+    Remove-Item -LiteralPath $fullPath -Recurse -Force
+}
+
+$developmentDirectories = @(
+    Get-ChildItem -LiteralPath $sitePackages -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -in @('example', 'examples', 'example_config_yaml') } |
+        Sort-Object { $_.FullName.Length } -Descending
+)
+foreach ($item in $developmentDirectories) {
+    if (-not (Test-Path -LiteralPath $item.FullName)) {
+        continue
+    }
+    $fullPath = [IO.Path]::GetFullPath($item.FullName)
+    if (-not $fullPath.StartsWith($siteRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to prune development path outside site-packages: $fullPath"
+    }
+    $measure = Get-ChildItem -LiteralPath $fullPath -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum
+    $removedFiles += $measure.Count
+    $removedBytes += [int64]$measure.Sum
+    Remove-Item -LiteralPath $fullPath -Recurse -Force
+}
+
+$bytecodeFiles = @(Get-ChildItem -LiteralPath $sitePackages -Recurse -File -Filter '*.pyc' -Force -ErrorAction SilentlyContinue)
+foreach ($item in $bytecodeFiles) {
+    $removedFiles += 1
+    $removedBytes += [int64]$item.Length
+    Remove-Item -LiteralPath $item.FullName -Force
+}
+$cacheDirectories = @(
+    Get-ChildItem -LiteralPath $sitePackages -Recurse -Directory -Filter '__pycache__' -Force -ErrorAction SilentlyContinue |
+        Sort-Object { $_.FullName.Length } -Descending
+)
+foreach ($item in $cacheDirectories) {
+    if (Test-Path -LiteralPath $item.FullName) {
+        Remove-Item -LiteralPath $item.FullName -Recurse -Force
     }
 }
 

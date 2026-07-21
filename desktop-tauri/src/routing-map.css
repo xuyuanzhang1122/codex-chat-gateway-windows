@@ -210,6 +210,21 @@
   box-shadow: 0 18px 46px rgba(0, 0, 0, 0.38), 0 0 30px rgba(185, 255, 61, 0.045), inset 3px 0 0 rgba(185, 255, 61, 0.72);
 }
 
+.flow-model-node.is-disabled {
+  border-color: rgba(255, 255, 255, 0.055);
+  color: rgba(255, 255, 255, 0.42);
+  background: rgba(7, 8, 7, 0.9);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.24);
+  filter: saturate(0.2);
+  opacity: 0.52;
+}
+
+.flow-model-node.is-disabled .flow-node-kicker,
+.flow-model-node.is-disabled .flow-model-name,
+.flow-model-node.is-disabled .flow-node-meta {
+  color: rgba(255, 255, 255, 0.34);
+}
+
 .flow-node-kicker {
   display: flex;
   align-items: center;
@@ -258,6 +273,24 @@
   background:
     linear-gradient(110deg, rgba(185, 255, 61, 0.075), transparent 44%),
     rgba(10, 12, 10, 0.97);
+}
+
+.flow-upstream-node.is-disabled,
+.flow-upstream-node.has-traffic.is-disabled {
+  border-color: rgba(255, 255, 255, 0.05);
+  background: rgba(6, 7, 6, 0.88);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+  filter: saturate(0.1);
+  opacity: 0.45;
+}
+
+.flow-upstream-node.is-disabled .flow-site-icon,
+.flow-upstream-node.is-disabled .flow-site-name,
+.flow-upstream-node.is-disabled .flow-site-count {
+  border-color: rgba(255, 255, 255, 0.055);
+  color: rgba(255, 255, 255, 0.32);
+  background: rgba(255, 255, 255, 0.015);
+  box-shadow: none;
 }
 
 .flow-site-icon {
@@ -325,6 +358,12 @@
   box-shadow: 0 0 10px rgba(185, 255, 61, 0.65);
 }
 
+.is-disabled .flow-handle {
+  border-color: #090a09 !important;
+  background: #454a43 !important;
+  box-shadow: none;
+}
+
 .electric-route-halo {
   stroke: rgba(185, 255, 61, 0.14) !important;
   stroke-width: 10 !important;
@@ -359,6 +398,21 @@
 .electric-route.is-fresh .electric-route-halo {
   stroke: rgba(185, 255, 61, 0.32) !important;
   animation: flow-fresh-glow 0.8s ease-in-out infinite alternate;
+}
+
+.electric-route.is-inactive {
+  opacity: 0.34;
+}
+
+.electric-route.is-inactive .electric-route-halo {
+  stroke: transparent !important;
+  filter: none;
+}
+
+.electric-route.is-inactive .electric-route-core {
+  stroke: rgba(112, 119, 107, 0.42) !important;
+  stroke-width: 1 !important;
+  stroke-dasharray: 3 8;
 }
 
 .routing-map-canvas .react-flow__controls {

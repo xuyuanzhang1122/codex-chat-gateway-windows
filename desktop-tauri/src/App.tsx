@@ -1,6 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActionIcon,
   Alert,
   Block,
   Button,
@@ -13,7 +12,6 @@ import {
   InputPassword,
   Modal,
   SearchBar,
-  SideNav,
   Tag,
   Text,
   Tooltip,
@@ -122,7 +120,6 @@ const emptyStatus: GatewayStatus = {
 };
 
 const GITHUB = "https://github.com/xuyuanzhang1122/codex-chat-gateway-windows";
-const LOBE_UI = "https://ui.lobehub.com";
 
 async function copyText(text: string): Promise<boolean> {
   try {
@@ -180,6 +177,12 @@ function App() {
       }),
     [],
   );
+
+  useEffect(() => {
+    const blockContextMenu = (event: MouseEvent) => event.preventDefault();
+    window.addEventListener("contextmenu", blockContextMenu);
+    return () => window.removeEventListener("contextmenu", blockContextMenu);
+  }, []);
 
   const pushLog = useCallback((level: LogLevel, msg: string) => {
     if (!msg) return;
@@ -450,49 +453,92 @@ function App() {
     }
   };
 
-  const navItems = useMemo(
-    () => [
-      { key: "gateway" as const, title: "网关", icon: Server },
-      { key: "routing" as const, title: "分流预览", icon: GitBranch },
-      { key: "models" as const, title: "模型", icon: Layers3 },
-      { key: "clients" as const, title: "客户端", icon: Users },
-      { key: "activity" as const, title: "日志", icon: Activity },
-    ],
-    [],
-  );
+  const navItems = useMemo(() => {
+    const defaultProfile = store.profiles.find((item) => item.id === store.default_id);
+    const enabledModels = (store.routing.model_rules ?? []).filter((item) => item.enabled).length;
+    return [
+      {
+        key: "gateway" as const,
+        title: "网关",
+        meta: status.healthy ? `运行中 · PID ${status.pid ?? "—"}` : status.busy ? "状态切换中" : "当前未运行",
+        icon: Server,
+        live: status.healthy,
+      },
+      {
+        key: "routing" as const,
+        title: "分流预览",
+        meta: `${enabledModels} 个模型 · ${traffic.routes.length} 条线路`,
+        icon: GitBranch,
+        live: status.healthy && traffic.routes.length > 0,
+      },
+      {
+        key: "models" as const,
+        title: "模型与上游",
+        meta: defaultProfile ? `${store.profiles.length} 个上游 · ${defaultProfile.name}` : `${store.profiles.length} 个上游 · 未设默认`,
+        icon: Layers3,
+        live: !!defaultProfile,
+      },
+      {
+        key: "clients" as const,
+        title: "客户端接入",
+        meta: "Codex · Claude Desktop",
+        icon: Users,
+        live: false,
+      },
+      {
+        key: "activity" as const,
+        title: "运行日志",
+        meta: `${logs.length} 条本次会话记录`,
+        icon: Activity,
+        live: logs.some((item) => item.level === "ERR"),
+        alert: logs.some((item) => item.level === "ERR"),
+      },
+    ];
+  }, [logs, status, store, traffic.routes.length]);
 
   return (
     <>
       <div className="app-shell">
         <TitleBar />
         <div className="workspace">
-          <SideNav
-            avatar={<img src="/gateway-logo.png" width={32} height={32} alt="" style={{ borderRadius: 8 }} />}
-            bottomActions={
-              <Tooltip title="GitHub">
-                <ActionIcon
-                  icon={ExternalLink}
-                  title="GitHub"
-                  onClick={() => void openUrl(info?.github || GITHUB)}
-                />
-              </Tooltip>
-            }
-            topActions={
-              <Flexbox gap={4}>
-                {navItems.map((item) => (
-                  <Tooltip key={item.key} title={item.title} placement="right">
-                    <ActionIcon
-                      active={page === item.key}
-                      icon={item.icon}
-                      size="large"
-                      title={item.title}
-                      onClick={() => setPage(item.key)}
-                    />
-                  </Tooltip>
-                ))}
-              </Flexbox>
-            }
-          />
+          <aside className="studio-sidebar" aria-label="主导航">
+            <div className="sidebar-brand">
+              <img src="/gateway-logo.png" width={34} height={34} alt="Codex Chat Gateway" />
+              <div>
+                <strong>CCG STUDIO</strong>
+                <span>LOCAL MODEL BRIDGE</span>
+              </div>
+            </div>
+            <nav className="sidebar-nav">
+              {navItems.map((item) => {
+                const NavIcon = item.icon;
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    className={`sidebar-nav-item${page === item.key ? " is-active" : ""}${item.alert ? " is-alert" : ""}`}
+                    aria-current={page === item.key ? "page" : undefined}
+                    onClick={() => setPage(item.key)}
+                  >
+                    <span className="sidebar-nav-icon"><NavIcon size={17} strokeWidth={1.8} /></span>
+                    <span className="sidebar-nav-copy">
+                      <strong>{item.title}</strong>
+                      <small>{item.meta}</small>
+                    </span>
+                    <span className={`sidebar-nav-state${item.live ? " is-live" : ""}`} aria-hidden="true" />
+                  </button>
+                );
+              })}
+            </nav>
+            <button
+              type="button"
+              className="sidebar-project-link"
+              onClick={() => void openUrl(info?.github || GITHUB)}
+            >
+              <ExternalLink size={15} />
+              <span><strong>项目主页</strong><small>GitHub · v{info?.version || "—"}</small></span>
+            </button>
+          </aside>
 
           <main className="workspace-main">
             <div className="main-col">
@@ -880,7 +926,6 @@ function App() {
                 )}
               </div>
 
-              <CreditBar info={info} />
             </div>
           </main>
         </div>
@@ -1498,12 +1543,12 @@ function ModelsView({
                     {group.profiles.map((profile) => {
                       const isDefault = profile.id === store.default_id;
                       return (
-                        <div className="routing-upstream" key={profile.id}>
+                        <div className={`routing-upstream${isDefault ? " is-default" : ""}`} key={profile.id}>
                           <span className={`upstream-rail${profile.routing_enabled ? " is-on" : ""}`} />
                           <Flexbox gap={2} style={{ minWidth: 0, flex: 1 }}>
                             <Flexbox horizontal gap={6} align="center" style={{ minWidth: 0 }}>
                               <Text weight={700} fontSize={12} ellipsis>{profile.name}</Text>
-                              {isDefault && <Tag>默认上游</Tag>}
+                              {isDefault && <span className="default-upstream-badge"><Star size={10} fill="currentColor" /> 默认上游</span>}
                             </Flexbox>
                             <Text type="secondary" fontSize={10.5} ellipsis>
                               {upstreamHost(profile.base_url)}
@@ -1572,6 +1617,7 @@ function ModelsView({
               return (
                 <Block
                   key={p.id}
+                  className={`model-profile-card${selected ? " is-selected" : ""}${isDefault ? " is-default" : ""}`}
                   clickable
                   variant={selected ? "filled" : "outlined"}
                   padding={14}
@@ -1581,10 +1627,13 @@ function ModelsView({
                 >
                   <Flexbox gap={8}>
                     <Flexbox horizontal distribution="space-between" align="center">
-                      <Text weight={700} ellipsis style={{ maxWidth: 180 }}>
+                      <Text weight={700} ellipsis style={{ maxWidth: selected && isDefault ? 105 : 150 }}>
                         {p.name}
                       </Text>
-                      {isDefault && <Tag color="success">DEFAULT</Tag>}
+                      <Flexbox horizontal gap={5} align="center">
+                        {selected && <span className="selected-profile-badge"><CheckCircle2 size={11} /> 当前选中</span>}
+                        {isDefault && <span className="default-profile-badge"><Star size={11} fill="currentColor" /> 默认</span>}
+                      </Flexbox>
                     </Flexbox>
                     <Text type="secondary" fontSize={12} ellipsis>
                       {p.model_id}
@@ -1900,37 +1949,6 @@ function ActivityView({
         </div>
       </Flexbox>
     </Block>
-  );
-}
-
-function CreditBar({ info }: { info: ProjectInfo | null }) {
-  return (
-    <div className="credit-bar">
-      <Icon icon={ExternalLink} size="small" />
-      <a
-        href={info?.github || GITHUB}
-        onClick={(e) => {
-          e.preventDefault();
-          void openUrl(info?.github || GITHUB);
-        }}
-      >
-        codex-chat-gateway
-      </a>
-      <span>·</span>
-      <span>@{info?.credits.owner || "xuyuanzhang1122"}</span>
-      <span>·</span>
-      <a
-        href={LOBE_UI}
-        onClick={(e) => {
-          e.preventDefault();
-          void openUrl(LOBE_UI);
-        }}
-      >
-        LobeHub
-      </a>
-      <span>·</span>
-      <span>MIT · 非 OpenAI 官方</span>
-    </div>
   );
 }
 

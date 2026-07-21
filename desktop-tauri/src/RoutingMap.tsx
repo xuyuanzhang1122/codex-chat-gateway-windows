@@ -43,7 +43,7 @@ type UpstreamNodeData = {
 
 type ModelFlowNode = Node<ModelNodeData, "model">;
 type UpstreamFlowNode = Node<UpstreamNodeData, "upstream">;
-type ElectricFlowEdge = Edge<{ fresh: boolean; hits: number }, "electric">;
+type ElectricFlowEdge = Edge<{ active: boolean; fresh: boolean; hits: number }, "electric">;
 
 const normalizeModel = (value: string) => {
   const normalized = value.trim().toLowerCase();
@@ -71,13 +71,13 @@ const modelRoutingEnabled = (store: ModelStore, modelId: string) => {
 
 const ModelNode = memo(function ModelNode({ data }: NodeProps<ModelFlowNode>) {
   return (
-    <div className={`flow-model-node${data.enabled ? " is-enabled" : ""}`}>
+    <div className={`flow-model-node${data.enabled ? " is-enabled" : " is-disabled"}`}>
       <div className="flow-node-kicker">
         <Cpu size={12} /> MODEL CHANNEL
       </div>
       <div className="flow-model-name">{data.label}</div>
       <div className="flow-node-meta">
-        <span>{data.routes} 条已建立线路</span>
+        <span>{data.enabled ? `${data.routes} 条已建立线路` : "分流未启用"}</span>
         <span>{data.hits} 次命中</span>
       </div>
       <Handle type="source" position={Position.Bottom} className="flow-handle" />
@@ -89,7 +89,7 @@ const UpstreamNode = memo(function UpstreamNode({ data }: NodeProps<UpstreamFlow
   return (
     <div
       className={`flow-upstream-node${data.hits > 0 ? " has-traffic" : ""}${
-        data.enabled ? " is-enabled" : ""
+        data.enabled ? " is-enabled" : " is-disabled"
       }`}
     >
       <Handle type="target" position={Position.Top} className="flow-handle" />
@@ -130,16 +130,20 @@ const ElectricEdge = memo(function ElectricEdge({
   });
 
   return (
-    <g className={`electric-route${data?.fresh ? " is-fresh" : ""}`} data-edge-id={id}>
+    <g className={`electric-route${data?.active ? " is-active" : " is-inactive"}${data?.fresh ? " is-fresh" : ""}`} data-edge-id={id}>
       <BaseEdge path={edgePath} className="electric-route-halo" />
       <BaseEdge path={edgePath} markerEnd={markerEnd} className="electric-route-core" />
-      <path d={edgePath} className="electric-route-dashes" />
-      <circle r="3.3" className="electric-packet electric-packet-a">
-        <animateMotion dur="1.75s" repeatCount="indefinite" path={edgePath} />
-      </circle>
-      <circle r="2.2" className="electric-packet electric-packet-b">
-        <animateMotion dur="1.75s" begin="-0.88s" repeatCount="indefinite" path={edgePath} />
-      </circle>
+      {data?.active && (
+        <>
+          <path d={edgePath} className="electric-route-dashes" />
+          <circle r="3.3" className="electric-packet electric-packet-a">
+            <animateMotion dur="1.75s" repeatCount="indefinite" path={edgePath} />
+          </circle>
+          <circle r="2.2" className="electric-packet electric-packet-b">
+            <animateMotion dur="1.75s" begin="-0.88s" repeatCount="indefinite" path={edgePath} />
+          </circle>
+        </>
+      )}
     </g>
   );
 });
@@ -188,13 +192,14 @@ function buildGraph(store: ModelStore, traffic: RoutingTrafficStore) {
     const groupWidth = Math.max(300, group.profiles.length * 260);
     const modelNodeId = `model:${group.key}`;
     const routes = traffic.routes.filter((route) => normalizeModel(route.model_id) === group.key);
+    const groupEnabled = modelRoutingEnabled(store, group.label);
     nodes.push({
       id: modelNodeId,
       type: "model",
       position: { x: cursorX + groupWidth / 2 - 130, y: 28 },
       data: {
         label: group.label,
-        enabled: modelRoutingEnabled(store, group.label),
+        enabled: groupEnabled,
         routes: routes.length,
         hits: routes.reduce((total, route) => total + route.hit_count, 0),
       },
@@ -222,18 +227,20 @@ function buildGraph(store: ModelStore, traffic: RoutingTrafficStore) {
 
       if (route) {
         const seen = Date.parse(route.last_seen_at);
+        const active = groupEnabled && !!profile?.routing_enabled;
         edges.push({
           id: `route:${group.key}:${profileId}`,
           type: "electric",
           source: modelNodeId,
           target: upstreamId,
           data: {
-            fresh: Number.isFinite(seen) && now - seen < 4_500,
+            active,
+            fresh: active && Number.isFinite(seen) && now - seen < 4_500,
             hits: route.hit_count,
           },
           markerEnd: {
             type: MarkerType.ArrowClosed,
-            color: "#b9ff3d",
+            color: active ? "#b9ff3d" : "#454a43",
             width: 16,
             height: 16,
           },
