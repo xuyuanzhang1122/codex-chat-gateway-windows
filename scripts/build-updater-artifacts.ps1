@@ -133,7 +133,9 @@ try {
             npx tauri signer sign --private-key-path $signingKeyPath $installerPath
         }
         else {
-            npx tauri signer sign --private-key-path $signingKeyPath --password "" $installerPath
+            # Keep the empty value attached: some PowerShell native argument
+            # modes drop a separate empty string and shift FILE into PASSWORD.
+            npx tauri signer sign --private-key-path $signingKeyPath --password= $installerPath
         }
     }
     else {
@@ -141,7 +143,7 @@ try {
             npx tauri signer sign $installerPath
         }
         else {
-            npx tauri signer sign --password "" $installerPath
+            npx tauri signer sign --password= $installerPath
         }
     }
     if ($LASTEXITCODE -ne 0) { throw 'Signing the full Studio installer failed.' }
