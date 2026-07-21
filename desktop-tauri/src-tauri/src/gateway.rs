@@ -28,6 +28,7 @@ pub const GATEWAY_PORT: u16 = 4000;
 pub const ENDPOINT: &str = "http://127.0.0.1:4000";
 pub const ENDPOINT_V1: &str = "http://127.0.0.1:4000/v1";
 pub const GITHUB_REPO: &str = "https://github.com/xuyuanzhang1122/codex-chat-gateway-windows";
+const LIVE_RELOAD_URL: &str = "http://127.0.0.1:4000/internal/ccg/reload";
 
 const REQUIRED_ROUTES: &[&str] = &[
     "codex-chat",
@@ -411,6 +412,91 @@ impl GatewayManager {
         }
     }
 
+    /// Apply models.json to the already-running LiteLLM Router. The local
+    /// aliases and listening socket stay alive, so clients do not disconnect.
+    pub fn reload_live_config(&self, app: &AppHandle) -> ActionResult {
+        emit_log(app, "INFO", "▶ 热更新上游路由");
+        if !health_probe(500) {
+            let st = self.refresh_light();
+            let message = "网关尚未就绪，配置会在下次启动时生效".to_string();
+            emit_log(app, "ERR", &message);
+            return ActionResult {
+                ok: false,
+                message,
+                logs: Vec::new(),
+                status: st,
+            };
+        }
+
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(5))
+            .build();
+        let response = agent.post(LIVE_RELOAD_URL).send_json(serde_json::json!({}));
+        match response {
+            Ok(resp) => {
+                let payload: serde_json::Value = resp.into_json().unwrap_or_default();
+                if !payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let st = self.refresh_light();
+                    let message = "网关拒绝了模型配置热更新".to_string();
+                    emit_log(app, "ERR", &message);
+                    return ActionResult {
+                        ok: false,
+                        message,
+                        logs: Vec::new(),
+                        status: st,
+                    };
+                }
+            }
+            Err(ureq::Error::Status(404, _)) => {
+                let st = self.refresh_light();
+                let message = "当前网关进程版本较旧，请仅重启一次网关以启用热更新".to_string();
+                emit_log(app, "ERR", &message);
+                return ActionResult {
+                    ok: false,
+                    message,
+                    logs: Vec::new(),
+                    status: st,
+                };
+            }
+            Err(_) => {
+                let st = self.refresh_light();
+                let message = "模型配置热更新失败，现有路由保持不变".to_string();
+                emit_log(app, "ERR", &message);
+                return ActionResult {
+                    ok: false,
+                    message,
+                    logs: Vec::new(),
+                    status: st,
+                };
+            }
+        }
+
+        let root = project_root();
+        if let Ok(store) = read_store() {
+            if let Some(profile) = default_profile(&store) {
+                if let Some(mut state) = read_state_file(&root) {
+                    state.model = profile.litellm_model.clone();
+                    let _ = write_state_file(&root, &state);
+                }
+                self.set_default_name(Some(profile.name.clone()));
+            }
+        }
+        self.refresh_full();
+        let st = {
+            let mut g = self.inner.write();
+            g.status.message = "运行中 · 上游路由已热更新".into();
+            g.status.clone()
+        };
+        emit_log(app, "OK", "上游路由已热更新，客户端连接保持不变");
+        emit_status(app, &st);
+        ActionResult {
+            ok: true,
+            message: "上游路由已热更新".to_string(),
+            logs: vec!["客户端固定别名保持不变".to_string()],
+            status: st,
+        }
+    }
+
     fn run_start(&self, app: &AppHandle) {
         {
             let mut g = self.inner.write();
@@ -539,7 +625,9 @@ impl GatewayManager {
             .env("UPSTREAM_BASE_URL", &profile.base_url)
             .env("UPSTREAM_API_KEY", &profile.api_key)
             .env("GATEWAY_HOST", GATEWAY_HOST)
-            .env("GATEWAY_PORT", GATEWAY_PORT.to_string());
+            .env("GATEWAY_PORT", GATEWAY_PORT.to_string())
+            .env("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+            .env("LITELLM_DONT_SHOW_FEEDBACK_BOX", "True");
 
         #[cfg(windows)]
         {

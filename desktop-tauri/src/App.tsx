@@ -14,7 +14,6 @@ import {
   Modal,
   SearchBar,
   SideNav,
-  Snippet,
   Tag,
   Text,
   Tooltip,
@@ -69,6 +68,7 @@ type ActionKey =
   | "start"
   | "stop"
   | "restart"
+  | "reload"
   | "check"
   | "codex-cfg"
   | "codex-restore"
@@ -374,49 +374,38 @@ function App() {
     void api.start();
   };
 
+  const applyLiveModelConfig = async (successMessage: string) => {
+    if (!live) {
+      pushLog("DIM", "配置已保存，将在下次启动网关时生效");
+      return;
+    }
+    beginAction("reload", "正在热更新上游路由…");
+    try {
+      const result = await api.reloadConfig();
+      setStatus(result.status);
+      if (!result.ok) {
+        showFeedback({ key: "reload", state: "err", message: result.message });
+        pushLog("ERR", result.message);
+      } else {
+        showFeedback({ key: "reload", state: "ok", message: successMessage });
+        pushLog("OK", `${successMessage} · 客户端连接保持不变`);
+      }
+    } catch (e) {
+      showFeedback({ key: "reload", state: "err", message: String(e) });
+      pushLog("ERR", `热更新失败: ${String(e)}`);
+    } finally {
+      pendingKey.current = null;
+    }
+  };
+
   const saveModel = async (input: ModelInput, editId?: string) => {
-    const previous = editId ? store.profiles.find((p) => p.id === editId) : undefined;
-    const wasRouted = previous ? isProfileInRoutingPool(store, previous) : false;
     const next = editId
       ? await api.editModel(editId, input)
       : await api.createModel(input);
     setStore(next);
     setDialog(null);
     pushLog("OK", editId ? `已更新 ${input.name}` : `已保存 ${input.name}`);
-    const updated = editId
-      ? next.profiles.find((p) => p.id === editId)
-      : next.profiles[next.profiles.length - 1];
-    const touched =
-      (editId && editId === store.default_id) ||
-      (!editId && next.profiles.length === 1) ||
-      wasRouted ||
-      (!!updated && isProfileInRoutingPool(next, updated));
-    if (live && touched) {
-      const yes = await confirm({
-        title: "重启网关",
-        content: "配置已变更，是否立即重启网关？",
-        okText: "立即重启",
-        cancelText: "稍后",
-      });
-      if (yes) {
-        beginAction("restart", "正在重启网关…");
-        void api.restart();
-      }
-    }
-  };
-
-  const restartAfterRoutingChange = async (message: string, affectsRunningModel: boolean) => {
-    if (!live || !affectsRunningModel) return;
-    const yes = await confirm({
-      title: "重启网关",
-      content: message,
-      okText: "立即重启",
-      cancelText: "稍后",
-    });
-    if (yes) {
-      beginAction("restart", "正在重启网关…");
-      void api.restart();
-    }
+    await applyLiveModelConfig(editId ? "模型配置已热更新" : "模型配置已应用");
   };
 
   const changeModelRouting = async (modelId: string, enabled: boolean) => {
@@ -431,10 +420,7 @@ function App() {
       });
       pendingKey.current = null;
       pushLog("OK", enabled ? `已开启 ${modelId} 多账号分流` : `已关闭 ${modelId} 分流`);
-      await restartAfterRoutingChange(
-        "当前运行模型的分流设置已变更，重启后生效。是否立即重启？",
-        isDefaultModelId(store, modelId),
-      );
+      await applyLiveModelConfig("分流设置已热更新");
     } catch (e) {
       showFeedback({ key: "routing", state: "err", message: String(e) });
       pendingKey.current = null;
@@ -456,10 +442,7 @@ function App() {
       });
       pendingKey.current = null;
       pushLog("OK", enabled ? `分流上游已启用 · ${profile.name}` : `分流上游已停用 · ${profile.name}`);
-      await restartAfterRoutingChange(
-        "当前运行模型的上游绑定已变更，重启后生效。是否立即重启？",
-        isDefaultModelId(store, profile.model_id) && isModelRoutingEnabled(store, profile.model_id),
-      );
+      await applyLiveModelConfig("分流上游已热更新");
     } catch (e) {
       showFeedback({ key: "routing", state: "err", message: String(e) });
       pendingKey.current = null;
@@ -634,10 +617,6 @@ function App() {
                             models,
                             parsed.name_hint,
                           );
-                          const existingIds = new Set(store.profiles.map((p) => p.id));
-                          const addedToRoutingPool = next.profiles.some(
-                            (p) => !existingIds.has(p.id) && isProfileInRoutingPool(next, p),
-                          );
                           setStore(next);
                           showFeedback({
                             key: "import",
@@ -649,18 +628,7 @@ function App() {
                             "OK",
                             `已从文本导入 ${models.length} 个模型 · ${parsed.base_url}`,
                           );
-                          if (live && addedToRoutingPool) {
-                            const yes = await confirm({
-                              title: "重启网关",
-                              content: "导入内容新增了当前模型的分流账号。是否立即重启网关？",
-                              okText: "立即重启",
-                              cancelText: "稍后",
-                            });
-                            if (yes) {
-                              beginAction("restart", "正在重启网关…");
-                              void api.restart();
-                            }
-                          }
+                          await applyLiveModelConfig("导入的模型配置已应用");
                         } catch (e) {
                           showFeedback({
                             key: "import",
@@ -711,18 +679,7 @@ function App() {
                         showFeedback({ key: "default", state: "ok", message: "已设为默认模型" });
                         pendingKey.current = null;
                         pushLog("OK", "已设为默认");
-                        if (live) {
-                          const yes = await confirm({
-                            title: "重启网关",
-                            content: "默认模型已切换，是否立即重启网关？",
-                            okText: "立即重启",
-                            cancelText: "稍后",
-                          });
-                          if (yes) {
-                            beginAction("restart", "正在重启网关…");
-                            void api.restart();
-                          }
-                        }
+                        await applyLiveModelConfig("默认模型已即时切换");
                       } catch (e) {
                         showFeedback({ key: "default", state: "err", message: String(e) });
                         pendingKey.current = null;
@@ -735,8 +692,6 @@ function App() {
                       if (!id) return;
                       const p = store.profiles.find((x) => x.id === id);
                       if (!p) return;
-                      const wasDefault = p.id === store.default_id;
-                      const wasRouted = isProfileInRoutingPool(store, p);
                       const ok = await confirm({
                         title: "确认删除",
                         content: `删除模型配置「${p.name}」？此操作不可撤销。`,
@@ -747,23 +702,16 @@ function App() {
                       if (!ok) return;
                       beginAction("delete", "正在删除…");
                       try {
-                        setStore(await api.removeModel(id));
+                        const next = await api.removeModel(id);
+                        setStore(next);
                         showFeedback({ key: "delete", state: "ok", message: `已删除 ${p.name}` });
                         pendingKey.current = null;
                         pushLog("OK", `已删除 ${p.name}`);
-                        if (live && (wasDefault || wasRouted)) {
-                          const yes = await confirm({
-                            title: "重启网关",
-                            content: wasDefault
-                              ? "删除的是默认模型。是否立即重启网关以应用新的默认配置？"
-                              : "删除的是当前分流池账号。是否立即重启网关以更新路由？",
-                            okText: "立即重启",
-                            cancelText: "稍后",
-                          });
-                          if (yes) {
-                            beginAction("restart", "正在重启网关…");
-                            void api.restart();
-                          } else pushLog("DIM", "稍后请手动重启网关");
+                        if (live && next.profiles.length === 0) {
+                          beginAction("stop", "最后一个模型已删除，正在停止网关…");
+                          void api.stop();
+                        } else {
+                          await applyLiveModelConfig("模型删除已即时应用");
                         }
                       } catch (e) {
                         showFeedback({ key: "delete", state: "err", message: String(e) });
@@ -1248,7 +1196,14 @@ function GatewayView({
             <Text type="secondary" fontSize={12}>
               Endpoint
             </Text>
-            <Snippet>{status.endpoint}</Snippet>
+            <Button
+              size="small"
+              icon={Copy}
+              onClick={() => void copyText(status.endpoint)}
+              title="复制本地接口地址"
+            >
+              {status.endpoint}
+            </Button>
           </Flexbox>
           <Flexbox horizontal gap={8} style={{ flexWrap: "wrap" }}>
             <Button
@@ -1410,14 +1365,6 @@ function isModelRoutingEnabled(store: ModelStore, modelId: string) {
   return !!rules.find(
     (rule) => normalizedModelId(rule.model_id) === normalizedModelId(modelId),
   )?.enabled;
-}
-
-function isProfileInRoutingPool(store: ModelStore, profile: ModelProfile) {
-  return (
-    profile.routing_enabled &&
-    isDefaultModelId(store, profile.model_id) &&
-    isModelRoutingEnabled(store, profile.model_id)
-  );
 }
 
 function upstreamHost(baseUrl: string) {

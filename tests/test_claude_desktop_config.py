@@ -69,6 +69,11 @@ def test_apply_and_restore() -> None:
             "claude-opus-4-8",
             "claude-haiku-4-5",
         ]
+        assert [item["labelOverride"] for item in profile_json["inferenceModels"]] == [
+            "Codex Chat Gateway (Sonnet)",
+            "Codex Chat Gateway (Opus)",
+            "Codex Chat Gateway (Haiku)",
+        ]
         assert load(meta)["appliedId"] == PROFILE_ID
         assert load(meta)["keepMeta"] is True
 

@@ -169,7 +169,6 @@ foreach ($dir in @('scripts', 'patches', 'docs')) {
 $stageExe = Join-Path $stage 'CodexChatGateway.exe'
 Copy-Item -LiteralPath $tauriExe -Destination $stageExe -Force
 Copy-Item -LiteralPath $runtimeSource -Destination (Join-Path $stage 'runtime') -Recurse -Force
-Copy-Item -LiteralPath $tauriExe -Destination (Join-Path $stage 'codex-chat-gateway-desktop.exe') -Force
 
 $icon = Join-Path $projectRoot 'desktop\assets\gateway-logo.ico'
 if (Test-Path -LiteralPath $icon) {

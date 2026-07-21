@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "codex-chat-gateway-desktop"
-version = "1.4.4"
+version = "1.4.6"
 dependencies = [
  "chrono",
  "parking_lot",

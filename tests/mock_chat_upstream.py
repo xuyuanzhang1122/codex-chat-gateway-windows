@@ -7,6 +7,9 @@ import time
 
 
 class Handler(BaseHTTPRequestHandler):
+    response_text = "mock response ok"
+    stream_text = "mock stream ok"
+
     def log_message(self, format: str, *args: object) -> None:
         return
 
@@ -45,7 +48,13 @@ class Handler(BaseHTTPRequestHandler):
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": model,
-                    "choices": [{"index": 0, "delta": {"content": "mock stream ok"}, "finish_reason": None}],
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": self.stream_text},
+                            "finish_reason": None,
+                        }
+                    ],
                 },
                 {
                     "id": "chatcmpl-mock",
@@ -83,7 +92,7 @@ class Handler(BaseHTTPRequestHandler):
             }
             finish_reason = "tool_calls"
         else:
-            message = {"role": "assistant", "content": "mock response ok"}
+            message = {"role": "assistant", "content": self.response_text}
 
         payload = {
             "id": "chatcmpl-mock",
@@ -104,7 +113,11 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=4012)
+    parser.add_argument("--response-text", default="mock response ok")
+    parser.add_argument("--stream-text", default="mock stream ok")
     args = parser.parse_args()
+    Handler.response_text = args.response_text
+    Handler.stream_text = args.stream_text
     ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
 
 

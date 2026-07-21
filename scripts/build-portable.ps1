@@ -63,6 +63,9 @@ if ($LASTEXITCODE -ne 0) { throw "Build Python does not provide pip: $BuildPytho
 & $BuildPython -m pip install --disable-pip-version-check --quiet --target $sitePackages -r (Join-Path $projectRoot 'requirements.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
 
+& (Join-Path $PSScriptRoot 'prune-embedded-runtime.ps1') -RuntimeDir $runtime
+if ($LASTEXITCODE -ne 0) { throw 'Embedded runtime pruning failed.' }
+
 $rootFiles = @(
     '.gitignore', 'AGENTS.md', 'README.md', 'CHANGELOG.md', 'LICENSE',
     'THIRD_PARTY_NOTICES.md', 'VERSION',

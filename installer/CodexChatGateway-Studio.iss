@@ -36,10 +36,10 @@ OutputDir={#OutputDir}
 OutputBaseFilename=CodexChatGateway-Studio-Setup-v{#AppVersion}
 SetupIconFile=..\desktop\assets\gateway-logo.ico
 UninstallDisplayIcon={app}\{#AppExeName}
-Compression=lzma2/ultra64
+Compression=lzma2/normal
 SolidCompression=yes
 LZMAUseSeparateProcess=yes
-InternalCompressLevel=ultra64
+InternalCompressLevel=normal
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
@@ -74,7 +74,7 @@ english.FinishHeading=Studio is ready.
 english.FinishBody=Open the console, add a model, then start the gateway. Closing the window hides to tray and does not stop the gateway.
 english.ShortcutGroup=Shortcuts
 english.DesktopShortcut=Create a desktop shortcut
-english.AutostartShortcut=Start the console when I sign in
+english.AutostartShortcut=Start the gateway in the background when I sign in
 english.LaunchAfterInstall=Open Codex Chat Gateway Studio
 english.PurgePrompt=Also remove saved model keys, logs, and local settings?%n%nChoose No to keep them for a future reinstall.
 english.SetupRunning=Codex Chat Gateway is currently open. Exit the console from the tray menu, then run Setup again.
@@ -92,7 +92,7 @@ chinesesimplified.FinishHeading=Studio 已就绪。
 chinesesimplified.FinishBody=打开控制台，添加模型并启动网关。关闭窗口会隐藏到托盘，不会停止网关进程。
 chinesesimplified.ShortcutGroup=快捷方式
 chinesesimplified.DesktopShortcut=创建桌面快捷方式
-chinesesimplified.AutostartShortcut=登录 Windows 时打开控制台
+chinesesimplified.AutostartShortcut=登录 Windows 时在后台启动网关
 chinesesimplified.LaunchAfterInstall=打开 Codex Chat Gateway Studio
 chinesesimplified.PurgePrompt=是否同时删除已保存的模型密钥、日志和本地设置？%n%n选择“否”可保留这些数据，方便以后重新安装。
 chinesesimplified.SetupRunning=Codex Chat Gateway 正在运行。请从托盘菜单退出控制台后重新运行安装程序。
@@ -119,6 +119,7 @@ Type: filesandordirs; Name: "{app}\runtime"
 Type: filesandordirs; Name: "{app}\scripts"
 Type: filesandordirs; Name: "{app}\patches"
 Type: files; Name: "{app}\CodexChatGateway.exe"
+Type: files; Name: "{app}\codex-chat-gateway-desktop.exe"
 Type: files; Name: "{app}\run_gateway.py"
 Type: files; Name: "{app}\config.yaml"
 
@@ -129,7 +130,7 @@ Source: "CHINESE_TRANSLATION_LICENSE.txt"; DestDir: "{app}\licenses"; DestName: 
 [Icons]
 Name: "{autoprograms}\Codex Chat Gateway"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}"
 Name: "{autodesktop}\Codex Chat Gateway"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}"; Tasks: desktopicon
-Name: "{userstartup}\Codex Chat Gateway"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}"; Tasks: autostart
+Name: "{userstartup}\Codex Chat Gateway"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\scripts\start-background.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}"; Tasks: autostart
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchAfterInstall}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent

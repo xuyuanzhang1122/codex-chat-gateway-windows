@@ -4,7 +4,9 @@ import json
 import os
 import sys
 import tempfile
+import copy
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -72,6 +74,137 @@ def main() -> None:
     serialized = yaml.safe_dump(runtime)
     assert "sk-secret-a" not in serialized
     assert "sk-secret-b" not in serialized
+
+    class FakeRouter:
+        def __init__(self, model_list: list[dict]) -> None:
+            self.model_list = copy.deepcopy(model_list)
+            self.max_fallbacks = 0
+            self.enable_weighted_failover = False
+            self.allowed_fails = 0
+            self.deployment_affinity_ttl_seconds = 300
+
+        def get_model_list(self) -> list[dict]:
+            return copy.deepcopy(self.model_list)
+
+        def get_model_names(self) -> list[str]:
+            return [item["model_name"] for item in self.model_list]
+
+        def set_model_list(self, model_list: list[dict]) -> None:
+            self.model_list = copy.deepcopy(model_list)
+
+    fake_router = FakeRouter(BASE_CONFIG["model_list"])
+    hot_reload = gateway_runtime._apply_runtime_to_router(fake_router, runtime)
+    assert hot_reload["deployments"] == 4
+    assert hot_reload["routes"] == ["claude-sonnet-5", "codex-chat"]
+    assert fake_router.max_fallbacks == 1
+    assert fake_router.enable_weighted_failover is True
+    assert fake_router.deployment_affinity_ttl_seconds == 7200
+
+    class FailOnceRouter(FakeRouter):
+        def __init__(self, model_list: list[dict]) -> None:
+            super().__init__(model_list)
+            self.fail_next = True
+
+        def set_model_list(self, model_list: list[dict]) -> None:
+            if self.fail_next:
+                self.fail_next = False
+                self.model_list = []
+                raise ValueError("synthetic reload failure")
+            super().set_model_list(model_list)
+
+    fail_router = FailOnceRouter(BASE_CONFIG["model_list"])
+    original_models = fail_router.get_model_list()
+    try:
+        gateway_runtime._apply_runtime_to_router(fail_router, runtime)
+        raise AssertionError("reload failure should propagate")
+    except ValueError as exc:
+        assert "synthetic" in str(exc)
+    assert fail_router.get_model_list() == original_models
+
+    with tempfile.TemporaryDirectory() as temporary:
+        temporary_path = Path(temporary)
+        models_path = temporary_path / "models.json"
+        runtime_path = temporary_path / "runtime-config.yaml"
+        base_path = temporary_path / "config.yaml"
+        base_path.write_text(yaml.safe_dump(BASE_CONFIG), encoding="utf-8")
+        models_path.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "default_id": "account-a",
+                    "profiles": [first],
+                    "routing": {
+                        "enabled": False,
+                        "affinity_ttl_seconds": 3600,
+                        "model_rules": [],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        old_models_path = gateway_runtime.MODELS_PATH
+        old_runtime_path = gateway_runtime.RUNTIME_CONFIG_PATH
+        old_base_path = gateway_runtime._BASE_CONFIG_PATH
+        old_route_environment = gateway_runtime._route_environment_snapshot()
+        try:
+            gateway_runtime.MODELS_PATH = models_path
+            gateway_runtime.RUNTIME_CONFIG_PATH = runtime_path
+            gateway_runtime._BASE_CONFIG_PATH = base_path
+            os.environ["CCG_ROUTE_9_API_KEY"] = "stale-secret"
+
+            live_router = FakeRouter(BASE_CONFIG["model_list"])
+            proxy_server = SimpleNamespace(llm_router=live_router, llm_model_list=[])
+            applied = gateway_runtime.reload_live_config(proxy_server)
+            assert applied["ok"] is True
+            assert applied["runtime_config_persisted"] is True
+            assert "CCG_ROUTE_9_API_KEY" not in os.environ
+            assert os.environ["CCG_ROUTE_0_API_KEY"] == "sk-secret-a"
+
+            route_environment_before_failure = gateway_runtime._route_environment_snapshot()
+            models_path.write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "default_id": "account-b",
+                        "profiles": [second, first],
+                        "routing": {
+                            "enabled": True,
+                            "affinity_ttl_seconds": 3600,
+                            "model_rules": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            failing_live_router = FailOnceRouter(live_router.get_model_list())
+            failing_proxy = SimpleNamespace(
+                llm_router=failing_live_router,
+                llm_model_list=live_router.get_model_list(),
+            )
+            try:
+                gateway_runtime.reload_live_config(failing_proxy)
+                raise AssertionError("failed live reload should propagate")
+            except ValueError as exc:
+                assert "synthetic" in str(exc)
+            assert (
+                gateway_runtime._route_environment_snapshot()
+                == route_environment_before_failure
+            )
+        finally:
+            gateway_runtime.MODELS_PATH = old_models_path
+            gateway_runtime.RUNTIME_CONFIG_PATH = old_runtime_path
+            gateway_runtime._BASE_CONFIG_PATH = old_base_path
+            gateway_runtime._restore_route_environment(old_route_environment)
+
+    gateway_runtime.install_live_config_reload()
+    gateway_runtime.install_live_config_reload()
+    from litellm.proxy import proxy_server
+
+    assert sum(
+        1
+        for route in proxy_server.app.routes
+        if getattr(route, "path", None) == gateway_runtime.LIVE_RELOAD_PATH
+    ) == 1
 
     with tempfile.TemporaryDirectory() as temporary:
         models_path = Path(temporary) / "models.json"

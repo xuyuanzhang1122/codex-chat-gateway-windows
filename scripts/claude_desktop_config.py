@@ -124,7 +124,10 @@ def update_meta(path: Path, apply_profile: bool) -> None:
 
 def build_profile(base_url: str, model_label: str) -> dict[str, object]:
     base_url = base_url.rstrip("/")
-    label = model_label.strip() or "Current gateway model"
+    # Keep Claude's one-time profile independent from the selected upstream.
+    # model_label remains accepted for backwards-compatible automation, but it
+    # must never make an upstream switch require rewriting Claude files.
+    _ = model_label
     return {
         "coworkEgressAllowedHosts": ["*"],
         "disableDeploymentModeChooser": True,
@@ -133,7 +136,7 @@ def build_profile(base_url: str, model_label: str) -> dict[str, object]:
         "inferenceGatewayBaseUrl": base_url,
         "inferenceProvider": "gateway",
         "inferenceModels": [
-            {"name": route, "labelOverride": f"{label} ({role})"}
+            {"name": route, "labelOverride": f"Codex Chat Gateway ({role})"}
             for route, role in zip(ROUTE_IDS, ("Sonnet", "Opus", "Haiku"), strict=True)
         ],
     }
@@ -186,7 +189,7 @@ def main() -> int:
     parser.add_argument("action", choices=("apply", "restore"))
     parser.add_argument("--local-app-data", type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:4000")
-    parser.add_argument("--model-label", default="Current gateway model")
+    parser.add_argument("--model-label", default="Codex Chat Gateway")
     args = parser.parse_args()
 
     local_app_data = args.local_app_data or Path(

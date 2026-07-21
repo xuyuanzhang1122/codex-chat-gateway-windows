@@ -43,6 +43,7 @@ export const api = {
   start: () => invoke<void>("gateway_start"),
   stop: () => invoke<void>("gateway_stop"),
   restart: () => invoke<void>("gateway_restart"),
+  reloadConfig: () => invoke<ActionResult>("gateway_reload_config"),
   check: () => invoke<ActionResult>("gateway_check"),
   logsDir: () => invoke<string>("get_logs_dir"),
   openLogsDir: () => invoke<string>("open_logs_dir"),

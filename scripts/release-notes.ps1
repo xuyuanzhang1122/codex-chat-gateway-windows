@@ -11,7 +11,7 @@ $changelogPath = Join-Path $projectRoot 'CHANGELOG.md'
 
 $notes = ''
 if (Test-Path -LiteralPath $changelogPath) {
-    $changelog = Get-Content -LiteralPath $changelogPath -Raw
+    $changelog = Get-Content -LiteralPath $changelogPath -Raw -Encoding UTF8
     $escaped = [regex]::Escape($Version)
     if ($changelog -match "(?ms)^##\s+\[?$escaped\]?[^\n]*\n(.*?)(?=^##\s|\z)") {
         $notes = $Matches[1].Trim()

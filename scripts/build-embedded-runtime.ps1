@@ -75,6 +75,11 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Dependency installation failed.'
 }
 
+& (Join-Path $PSScriptRoot 'prune-embedded-runtime.ps1') -RuntimeDir $dest
+if ($LASTEXITCODE -ne 0) {
+    throw 'Embedded runtime pruning failed.'
+}
+
 if (-not (Test-Path -LiteralPath (Join-Path $dest 'python.exe'))) {
     throw "Embedded runtime incomplete: $dest"
 }

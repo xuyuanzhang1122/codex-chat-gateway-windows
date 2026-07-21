@@ -16,12 +16,26 @@ import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-MODELS_PATH = PROJECT_ROOT / ".gateway" / "models.json"
-RUNTIME_CONFIG_PATH = PROJECT_ROOT / ".gateway" / "runtime-config.yaml"
-ROUTING_TRAFFIC_PATH = PROJECT_ROOT / ".gateway" / "routing-traffic.json"
+MODELS_PATH = Path(
+    os.environ.get("CCG_MODELS_PATH", PROJECT_ROOT / ".gateway" / "models.json")
+).expanduser().resolve()
+RUNTIME_CONFIG_PATH = Path(
+    os.environ.get(
+        "CCG_RUNTIME_CONFIG_PATH", PROJECT_ROOT / ".gateway" / "runtime-config.yaml"
+    )
+).expanduser().resolve()
+ROUTING_TRAFFIC_PATH = Path(
+    os.environ.get(
+        "CCG_ROUTING_TRAFFIC_PATH", PROJECT_ROOT / ".gateway" / "routing-traffic.json"
+    )
+).expanduser().resolve()
+LIVE_RELOAD_PATH = "/internal/ccg/reload"
 _AFFINITY_SALT = os.urandom(32)
 _TELEMETRY_LOCK = threading.Lock()
 _RECENT_TELEMETRY_CALLS: dict[str, float] = {}
+_BASE_CONFIG_PATH: Path | None = None
+_ACTIVE_RUNTIME_REVISION: str | None = None
+_ROUTE_ENV_PREFIX = "CCG_ROUTE_"
 
 
 def _prompt_cache_affinity_id(prompt_cache_key: Any) -> str:
@@ -345,22 +359,235 @@ def _build_runtime_config(
     return runtime
 
 
+def _write_runtime_config(runtime: dict[str, Any]) -> str:
+    """Persist a key-free generated config and return its stable revision."""
+
+    rendered = yaml.safe_dump(runtime, allow_unicode=True, sort_keys=False)
+    revision = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
+    RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = RUNTIME_CONFIG_PATH.with_suffix(".yaml.tmp")
+    with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(rendered)
+    os.replace(temp_path, RUNTIME_CONFIG_PATH)
+    return revision
+
+
+def _current_runtime_config(base_path: Path | None = None) -> dict[str, Any]:
+    pool_result = _read_runtime_pool()
+    if pool_result is None:
+        raise ValueError("没有可应用的模型配置")
+
+    routing, pool = pool_result
+    config_path = base_path or _BASE_CONFIG_PATH or (PROJECT_ROOT / "config.yaml")
+    with config_path.open("r", encoding="utf-8") as handle:
+        base_config = yaml.safe_load(handle) or {}
+    return _build_runtime_config(base_config, routing, pool)
+
+
+def _route_environment_snapshot() -> dict[str, str]:
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name.startswith(_ROUTE_ENV_PREFIX)
+    }
+
+
+def _restore_route_environment(snapshot: dict[str, str]) -> None:
+    for name in tuple(os.environ):
+        if name.startswith(_ROUTE_ENV_PREFIX):
+            os.environ.pop(name, None)
+    os.environ.update(snapshot)
+
+
+def _prune_stale_route_environment(runtime: dict[str, Any]) -> None:
+    active_names: set[str] = set()
+    for deployment in runtime.get("model_list") or []:
+        if not isinstance(deployment, dict):
+            continue
+        params = deployment.get("litellm_params") or {}
+        if not isinstance(params, dict):
+            continue
+        for value in params.values():
+            if not isinstance(value, str) or not value.startswith("os.environ/"):
+                continue
+            name = value.removeprefix("os.environ/")
+            if name.startswith(_ROUTE_ENV_PREFIX):
+                active_names.add(name)
+
+    for name in tuple(os.environ):
+        if name.startswith(_ROUTE_ENV_PREFIX) and name not in active_names:
+            os.environ.pop(name, None)
+
+
+_RELOADABLE_ROUTER_SETTINGS = (
+    "max_fallbacks",
+    "enable_weighted_failover",
+    "allowed_fails",
+    "deployment_affinity_ttl_seconds",
+)
+
+
+def _apply_runtime_to_router(router: Any, runtime: dict[str, Any]) -> dict[str, Any]:
+    """Replace LiteLLM deployments in-process, with rollback on any failure.
+
+    LiteLLM owns all protocol conversion. We only use its public Router model-list
+    update path so Codex and Claude can keep stable local aliases while the
+    upstream deployment changes underneath them.
+    """
+
+    model_list = runtime.get("model_list") or []
+    expected_names = {
+        str(item.get("model_name") or "")
+        for item in model_list
+        if isinstance(item, dict) and item.get("model_name")
+    }
+    if not expected_names or "codex-chat" not in expected_names:
+        raise ValueError("生成的路由配置缺少 codex-chat")
+
+    old_model_list = copy.deepcopy(router.get_model_list())
+    router_settings = runtime.get("router_settings") or {}
+    old_settings = {
+        name: getattr(router, name)
+        for name in _RELOADABLE_ROUTER_SETTINGS
+        if hasattr(router, name)
+    }
+
+    try:
+        router.set_model_list(model_list)
+        for name in _RELOADABLE_ROUTER_SETTINGS:
+            if name in router_settings and hasattr(router, name):
+                setattr(router, name, router_settings[name])
+
+        actual_names = set(router.get_model_names())
+        if not expected_names.issubset(actual_names):
+            missing = ", ".join(sorted(expected_names - actual_names))
+            raise ValueError(f"热更新后缺少路由: {missing}")
+    except Exception:
+        router.set_model_list(old_model_list)
+        for name, value in old_settings.items():
+            setattr(router, name, value)
+        raise
+
+    return {
+        "routes": sorted(expected_names),
+        "deployments": len(model_list),
+    }
+
+
+def reload_live_config(proxy_server: Any | None = None) -> dict[str, Any]:
+    """Apply the latest models.json to the running LiteLLM router."""
+
+    global _ACTIVE_RUNTIME_REVISION
+    if proxy_server is None:
+        from litellm.proxy import proxy_server as litellm_proxy_server
+
+        proxy_server = litellm_proxy_server
+
+    router = getattr(proxy_server, "llm_router", None)
+    if router is None:
+        raise RuntimeError("LiteLLM 路由尚未就绪")
+
+    route_environment_before = _route_environment_snapshot()
+    try:
+        runtime = _current_runtime_config()
+        result = _apply_runtime_to_router(router, runtime)
+    except Exception:
+        # Runtime generation writes key-bearing CCG_ROUTE_* variables before
+        # LiteLLM validates the new model list. Roll back those variables with
+        # the router so the old deployments cannot accidentally read new keys.
+        _restore_route_environment(route_environment_before)
+        raise
+
+    _prune_stale_route_environment(runtime)
+    proxy_server.llm_model_list = router.get_model_list()
+    try:
+        revision = _write_runtime_config(runtime)
+        runtime_config_persisted = True
+    except OSError:
+        # models.json is the source of truth and the next start regenerates the
+        # key-free runtime config. Do not report the successful live switch as
+        # failed merely because this derived cache could not be written.
+        rendered = yaml.safe_dump(runtime, allow_unicode=True, sort_keys=False)
+        revision = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
+        runtime_config_persisted = False
+
+    _ACTIVE_RUNTIME_REVISION = revision
+    result.update(
+        {
+            "ok": True,
+            "revision": revision,
+            "runtime_config_persisted": runtime_config_persisted,
+        }
+    )
+    return result
+
+
+def install_live_config_reload() -> None:
+    """Add a loopback-only endpoint used by Studio for zero-downtime reloads."""
+
+    import asyncio
+
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+    from litellm.proxy import proxy_server
+
+    app = proxy_server.app
+    if getattr(app.state, "ccg_live_reload_installed", False):
+        return
+
+    reload_lock = asyncio.Lock()
+
+    async def reload_endpoint(request: Request):
+        client_host = request.client.host if request.client is not None else ""
+        if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+            return JSONResponse(
+                status_code=403,
+                content={"ok": False, "message": "仅允许本机热更新"},
+            )
+        async with reload_lock:
+            try:
+                return reload_live_config(proxy_server)
+            except Exception as exc:
+                # Never echo model details or credentials into HTTP/log output.
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "ok": False,
+                        "message": "模型配置热更新失败",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+    # `from __future__ import annotations` stores the nested annotation as the
+    # string "Request"; FastAPI resolves endpoint annotations against module
+    # globals. Bind the concrete class explicitly without importing FastAPI on
+    # the normal pre-LiteLLM startup path.
+    reload_endpoint.__annotations__["request"] = Request
+    app.add_api_route(
+        LIVE_RELOAD_PATH,
+        reload_endpoint,
+        methods=["POST"],
+        include_in_schema=False,
+        name="ccg_live_config_reload",
+    )
+    app.state.ccg_live_reload_installed = True
+
+
 def prepare_gateway_runtime() -> Path | None:
+    global _ACTIVE_RUNTIME_REVISION, _BASE_CONFIG_PATH
     pool_result = _read_runtime_pool()
     if pool_result is None:
         return None
 
     routing, pool = pool_result
     argument_index, base_path = _config_argument()
+    if _BASE_CONFIG_PATH is None or base_path != RUNTIME_CONFIG_PATH:
+        _BASE_CONFIG_PATH = base_path
+    base_path = _BASE_CONFIG_PATH
     with base_path.open("r", encoding="utf-8") as handle:
         base_config = yaml.safe_load(handle) or {}
     runtime = _build_runtime_config(base_config, routing, pool)
-
-    RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = RUNTIME_CONFIG_PATH.with_suffix(".yaml.tmp")
-    with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
-        yaml.safe_dump(runtime, handle, allow_unicode=True, sort_keys=False)
-    os.replace(temp_path, RUNTIME_CONFIG_PATH)
+    _ACTIVE_RUNTIME_REVISION = _write_runtime_config(runtime)
 
     if argument_index is None:
         sys.argv.extend(["--config", str(RUNTIME_CONFIG_PATH)])

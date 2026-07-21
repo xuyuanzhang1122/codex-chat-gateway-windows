@@ -198,6 +198,11 @@ fn gateway_restart(app: AppHandle, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
+fn gateway_reload_config(app: AppHandle, state: State<'_, AppState>) -> ActionResult {
+    state.gateway.reload_live_config(&app)
+}
+
+#[tauri::command]
 fn gateway_check(app: AppHandle, state: State<'_, AppState>) -> ActionResult {
     state.gateway.check_now(&app)
 }
@@ -515,6 +520,7 @@ pub fn run() {
             gateway_start,
             gateway_stop,
             gateway_restart,
+            gateway_reload_config,
             gateway_check,
             get_logs_dir,
             open_logs_dir,
