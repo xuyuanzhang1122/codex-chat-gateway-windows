@@ -1,27 +1,20 @@
 # Contributing
 
-Issues and PRs welcome.
+Only the Tauri Studio and native Rust gateway are supported.
 
-## Before you commit
+1. Put UI and desktop lifecycle changes in `desktop-tauri/`.
+2. Put routing, upstream transport, and protocol work in `native-gateway/`.
+3. Keep the listener fixed to `127.0.0.1` and never expose API keys through arguments, logs, frontend assets, or Codex configuration.
+4. Preserve direct same-protocol passthrough. Use the shared Rust conversion library only for cross-protocol requests.
+5. Do not add BAT launchers, C#/WPF projects, a Python runtime, LiteLLM, or legacy/portable release jobs.
 
-1. Never commit API keys, `.env`, `.gateway`, logs, or personal Codex config.
-2. Keep PowerShell under `scripts/` pure ASCII (Windows PowerShell 5.1).
-3. Do not commit updater **private** keys (`TAURI_SIGNING_PRIVATE_KEY*`).
-4. Prefer editing `desktop-tauri/` for the console; leave legacy `desktop/` unless you intend to touch WPF.
-5. Launchers live in `bin/` — keep paths relative to the repo root (`..\scripts\`).
-
-## Local checks
+Before submitting:
 
 ```powershell
-.\.venv\Scripts\python.exe .\tests\test_tool_output_adjacency.py
-.\.venv\Scripts\python.exe .\tests\test_codex_restore.py
-```
-
-```powershell
+cargo test --manifest-path native-gateway/Cargo.toml
+cargo check --manifest-path desktop-tauri/src-tauri/Cargo.toml
 cd desktop-tauri
 npm run build
-npm run tauri build -- --no-bundle
 ```
 
-Bump `VERSION` (and Studio package versions) before tagging `vX.Y.Z`.  
-See [docs/STRUCTURE.md](docs/STRUCTURE.md) and [docs/RELEASE_AND_UPDATES.md](docs/RELEASE_AND_UPDATES.md).
+For release changes, update root `VERSION` and `CHANGELOG.md`; do not edit crate versions independently.

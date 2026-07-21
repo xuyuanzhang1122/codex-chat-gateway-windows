@@ -1,68 +1,21 @@
-# 同模型多账号分流
+# Model and protocol routing
 
-Studio 的「同模型多账号分流」用于把一个逻辑模型（例如 `gpt-5.6-sol`）背后的新会话分配给多家 API 平台或多个账号，同时尽量保持上游缓存可复用。
+Each logical model contains one or more upstream profiles in `.gateway/models.json`. A profile declares its base URL, upstream model name, native wire protocol, authentication mode, weight, and enabled state.
 
-## 路由规则
+Supported wire protocols:
 
-1. Studio 按 `model_id` 自动组成模型组；每个模型可以独立开启/关闭分流，并分别选择参与的上游账号。
-2. 权重只作用于新会话。例如两个账号权重为 `3:1`，长期看新会话约为 75% 和 25%，不是每四个请求机械轮询。
-3. 同一会话优先保持在首次选中的账号。亲和信号依次包括 Responses API 的 `previous_response_id`、本地哈希后的 `prompt_cache_key`，以及兼容客户端提供的会话标识。
-4. 账号发生可重试错误或额度类错误后，LiteLLM 会将其短暂冷却，并在同模型池内选择其他账号。默认亲和时间为 60 分钟，冷却时间为 30 秒。
-5. 修改默认模型、分流开关、池内账号或权重后，Studio 会把新路由热更新到正在运行的网关；Codex 与 Claude Desktop 的本地别名和连接地址保持不变，无需重启。
-6. `codex-chat` 仍然使用当前默认模型。非默认模型的规则会保存在本地，切换为默认模型后直接生效。
+- OpenAI Responses
+- OpenAI Chat Completions
+- Anthropic Messages
 
-旧版 `models.json` 会按 v3 读取。已有 v2 全局分流开关会迁移为当时默认模型的独立规则；未开启分流的旧配置仍保持关闭，因此升级不会静默改变流量。
+## Request path
 
-## 分流预览
+1. The incoming route determines the client protocol.
+2. The gateway selects an enabled profile for the requested logical model using session affinity and profile weights.
+3. If the selected upstream uses the same protocol, the gateway forwards the payload and stream directly after applying routing fields.
+4. If protocols differ, the reusable Rust conversion layer translates the request, response, and SSE events.
+5. Network errors, rate limits, and upstream server errors can fail over to another profile in the same model pool.
 
-Studio 左侧的「分流预览」使用 [React Flow](https://github.com/xyflow/xyflow) 绘制实时选路图：模型位于上方，各 API 平台/账号位于下方。LiteLLM 选中某个 deployment 并准备发起上游请求时，对应线路会建立电流动画并常驻；之后的命中会累计次数并刷新最近时间。
+This allows a native Anthropic provider to serve Claude Code without conversion while the same logical model remains available to Codex through Responses. Providers that only support Chat Completions remain usable through cross-protocol conversion.
 
-轨迹聚合保存在未提交的 `.gateway/routing-traffic.json`。文件只包含 `model_id`、本地 profile ID/名称、上游域名、命中次数和首次/最近时间，不包含提示词、响应正文、API Key、请求头或请求 ID。修改代码升级后需重启一次网关，新的路由回调才会随网关进程加载。
-
-## 对额度的影响
-
-- 当前版本使用静态权重，不读取各平台的剩余额度，也不会承诺精确配额比例。可以根据套餐容量手动设置权重。
-- 429、超时等可重试故障会触发冷却/切换，减少单个平台持续失败，但这不是账单或限额管理器。
-- 故障切换到另一平台时，新平台看不到原平台的服务端缓存，可能需要重新处理完整上下文，并按新平台规则计费。
-- 权重分配单位是会话而不是单次请求，长会话的 token 消耗可能差异很大。因此 `3:1` 表示会话落点概率，不代表最终费用严格为 `3:1`。
-
-## 对 prompt cache 的影响
-
-服务端 prompt cache 通常不能跨 API 平台共享。若逐请求轮询，同一对话会在不同平台重复建立缓存，命中率和稳定性都会变差。本项目因此使用会话亲和：
-
-- 同一会话正常情况下始终落到同一 deployment，可继续利用该平台的自动前缀缓存。
-- `prompt_cache_key` 只在本机转换为带随机盐的 SHA-256 会话标识；原值不会写入日志、运行时 YAML 或第三方 metadata。
-- 当前不会把原始 `prompt_cache_key` 强行透传给第三方平台，因为不同 OpenAI 兼容接口对该字段的支持不一致，直接透传可能导致 400。
-- 若客户端不发送 `previous_response_id`、`prompt_cache_key` 或其他会话标识，网关无法识别上下文归属，请求可能重新选路；这类客户端的缓存命中无法保证。
-- 只有账号故障/冷却时才打破亲和。此时可用性优先于缓存命中。
-
-## 配置和密钥
-
-持久化配置位于未提交的 `.gateway/models.json`。运行时会生成 `.gateway/runtime-config.yaml`，其中只有环境变量引用，不包含 API Key；实际 Key 仅注入网关进程环境。
-
-核心字段示例：
-
-```json
-{
-  "version": 3,
-  "routing": {
-    "enabled": true,
-    "affinity_ttl_seconds": 3600,
-    "model_rules": [
-      {
-        "model_id": "gpt-5.6-sol",
-        "enabled": true
-      }
-    ]
-  },
-  "profiles": [
-    {
-      "model_id": "gpt-5.6-sol",
-      "routing_enabled": true,
-      "routing_weight": 3
-    }
-  ]
-}
-```
-
-建议先使用相同模型版本、相近上下文长度和工具调用能力的平台组成一个池。仅名称相同但行为差异明显的模型，故障切换后仍可能出现输出风格或工具兼容性变化。
+Routing telemetry contains model/profile identifiers, status, latency, and retry information only. Request content and API keys are never recorded.

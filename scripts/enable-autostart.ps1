@@ -9,9 +9,11 @@ if (-not $PSScriptRoot) {
     }
 }
 $projectRoot = if ($env:CODEX_CHAT_GATEWAY_ROOT) { $env:CODEX_CHAT_GATEWAY_ROOT } else { Split-Path -Parent $PSScriptRoot }
-. (Join-Path $PSScriptRoot 'model-store.ps1')
-try { Set-DefaultModelEnvironment -ProjectRoot $projectRoot | Out-Null }
-catch { Write-Host $_.Exception.Message; Write-Host 'Configure a model before enabling autostart.'; exit 1 }
+$modelsPath = Join-Path $projectRoot '.gateway\models.json'
+if (-not (Test-Path -LiteralPath $modelsPath)) {
+    Write-Host 'Configure a model in Studio before enabling autostart.'
+    exit 1
+}
 $startup = [Environment]::GetFolderPath('Startup')
 $shortcutPath = Join-Path $startup 'Codex Chat Gateway.lnk'
 $shell = New-Object -ComObject WScript.Shell

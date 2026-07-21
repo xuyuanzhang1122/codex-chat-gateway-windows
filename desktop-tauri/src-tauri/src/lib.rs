@@ -1,3 +1,4 @@
+mod client_config;
 mod gateway;
 mod models;
 mod paths;
@@ -15,12 +16,12 @@ use models::{
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri_plugin_opener::OpenerExt;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
 };
+use tauri_plugin_opener::OpenerExt;
 
 struct AppState {
     gateway: Arc<GatewayManager>,
@@ -250,7 +251,23 @@ fn run_script(
         let status = state.gateway.snapshot();
         status.running || status.healthy
     };
-    let mut result = run_project_script(&name)?;
+    let native_logs = match name.as_str() {
+        "configure-codex.ps1" => Some(client_config::configure_codex(4000)),
+        "restore-codex.ps1" => Some(client_config::restore_codex()),
+        "configure-claude-desktop.ps1" => Some(client_config::configure_claude()),
+        "restore-claude-desktop.ps1" => Some(client_config::restore_claude()),
+        _ => None,
+    };
+    let mut result = if let Some(logs) = native_logs {
+        ActionResult {
+            ok: true,
+            message: format!("{name} 完成"),
+            logs: logs?,
+            status: GatewayStatus::default(),
+        }
+    } else {
+        run_project_script(&name)?
+    };
     result.status = state.gateway.refresh_full();
     let should_recover = result.ok
         && was_running
@@ -345,7 +362,6 @@ pub fn sync_tray(app: &AppHandle, status: &GatewayStatus) {
     };
 
     let _ = tray.set_tooltip(Some(&tip));
-
 }
 
 fn tray_status_labels(status: &GatewayStatus) -> (String, String) {
@@ -382,7 +398,9 @@ fn show_tray_menu(app: &AppHandle, cursor: PhysicalPosition<f64>) {
     let Some(window) = app.get_webview_window("tray-menu") else {
         return;
     };
-    let size = window.outer_size().unwrap_or_else(|_| tauri::PhysicalSize::new(292, 286));
+    let size = window
+        .outer_size()
+        .unwrap_or_else(|_| tauri::PhysicalSize::new(292, 286));
     let mut x = cursor.x.round() as i32 - size.width as i32;
     let mut y = cursor.y.round() as i32 - size.height as i32 - 8;
 
@@ -397,8 +415,14 @@ fn show_tray_menu(app: &AppHandle, cursor: PhysicalPosition<f64>) {
         }) {
             let origin = monitor.position();
             let extent = monitor.size();
-            x = x.clamp(origin.x + 8, origin.x + extent.width as i32 - size.width as i32 - 8);
-            y = y.clamp(origin.y + 8, origin.y + extent.height as i32 - size.height as i32 - 8);
+            x = x.clamp(
+                origin.x + 8,
+                origin.x + extent.width as i32 - size.width as i32 - 8,
+            );
+            y = y.clamp(
+                origin.y + 8,
+                origin.y + extent.height as i32 - size.height as i32 - 8,
+            );
         }
     }
 

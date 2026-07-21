@@ -2,7 +2,6 @@ use crate::paths::{models_path, project_root};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,11 +11,33 @@ pub struct ModelProfile {
     pub base_url: String,
     pub api_key: String,
     pub model_id: String,
-    pub litellm_model: String,
+    #[serde(default)]
+    pub protocol: UpstreamProtocol,
+    #[serde(default)]
+    pub auth_mode: UpstreamAuthMode,
     #[serde(default = "default_true")]
     pub routing_enabled: bool,
     #[serde(default = "default_routing_weight")]
     pub routing_weight: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamProtocol {
+    /// Safe migration default: every existing v3 profile was configured as OpenAI Chat.
+    #[default]
+    OpenaiChat,
+    OpenaiResponses,
+    AnthropicMessages,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamAuthMode {
+    #[default]
+    Auto,
+    Bearer,
+    XApiKey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +80,7 @@ pub struct ModelStore {
 impl Default for ModelStore {
     fn default() -> Self {
         Self {
-            version: 3,
+            version: 4,
             default_id: String::new(),
             profiles: Vec::new(),
             routing: RoutingSettings::default(),
@@ -73,6 +94,10 @@ pub struct ModelInput {
     pub base_url: String,
     pub api_key: String,
     pub model_id: String,
+    #[serde(default)]
+    pub protocol: UpstreamProtocol,
+    #[serde(default)]
+    pub auth_mode: UpstreamAuthMode,
     #[serde(default = "default_true")]
     pub routing_enabled: bool,
     #[serde(default = "default_routing_weight")]
@@ -89,26 +114,6 @@ fn default_routing_weight() -> u32 {
 
 fn default_affinity_ttl_seconds() -> u64 {
     3600
-}
-
-pub fn litellm_model(base_url: &str, model_id: &str) -> String {
-    if base_url.to_ascii_lowercase().contains("deepseek") {
-        if model_id.to_ascii_lowercase().starts_with("deepseek/") {
-            return model_id.to_string();
-        }
-        return format!("deepseek/{model_id}");
-    }
-    if model_id.to_ascii_lowercase().starts_with("openai/") {
-        return model_id.to_string();
-    }
-    format!("openai/{model_id}")
-}
-
-pub fn claude_litellm_model(litellm_model: &str) -> String {
-    if let Some(rest) = litellm_model.strip_prefix("openai/") {
-        return format!("custom_openai/{rest}");
-    }
-    litellm_model.to_string()
 }
 
 pub fn normalized_model_id(value: &str) -> String {
@@ -136,9 +141,6 @@ pub fn read_store() -> Result<ModelStore, String> {
     let root = project_root();
     let path = models_path(&root);
     if !path.exists() {
-        if let Some(store) = import_legacy_env(&root)? {
-            return Ok(store);
-        }
         return Ok(ModelStore::default());
     }
     let text = fs::read_to_string(&path).map_err(|e| format!("读取模型配置失败: {e}"))?;
@@ -157,7 +159,7 @@ pub fn read_store() -> Result<ModelStore, String> {
             });
         }
     }
-    store.version = 3;
+    store.version = 4;
     store.routing.affinity_ttl_seconds = store.routing.affinity_ttl_seconds.clamp(300, 86_400);
     store.routing.enabled = store.routing.model_rules.iter().any(|rule| rule.enabled);
     for profile in &mut store.profiles {
@@ -184,64 +186,6 @@ pub fn save_store(store: &ModelStore) -> Result<(), String> {
     Ok(())
 }
 
-fn import_legacy_env(root: &Path) -> Result<Option<ModelStore>, String> {
-    let store_path = models_path(root);
-    if store_path.exists() {
-        return Ok(None);
-    }
-    let env_path = root.join(".env");
-    if !env_path.exists() {
-        return Ok(None);
-    }
-    let text = fs::read_to_string(&env_path).map_err(|e| e.to_string())?;
-    let mut values = std::collections::HashMap::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = trimmed.split_once('=') {
-            values.insert(
-                k.trim().to_string(),
-                v.trim().trim_matches(|c| c == '"' || c == '\'').to_string(),
-            );
-        }
-    }
-    let model = values.get("UPSTREAM_MODEL").cloned().unwrap_or_default();
-    let base_url = values.get("UPSTREAM_BASE_URL").cloned().unwrap_or_default();
-    let api_key = values.get("UPSTREAM_API_KEY").cloned().unwrap_or_default();
-    if model.is_empty()
-        || base_url.is_empty()
-        || api_key.is_empty()
-        || api_key == "replace-with-new-key"
-    {
-        return Ok(None);
-    }
-    let model_id = model
-        .split_once('/')
-        .map(|(_, r)| r.to_string())
-        .unwrap_or_else(|| model.clone());
-    let id = Uuid::new_v4().simple().to_string();
-    let profile = ModelProfile {
-        id: id.clone(),
-        name: "Imported model".into(),
-        base_url: base_url.trim_end_matches('/').to_string(),
-        api_key,
-        model_id,
-        litellm_model: model,
-        routing_enabled: true,
-        routing_weight: default_routing_weight(),
-    };
-    let store = ModelStore {
-        version: 3,
-        default_id: id,
-        profiles: vec![profile],
-        routing: RoutingSettings::default(),
-    };
-    save_store(&store)?;
-    Ok(Some(store))
-}
-
 pub fn default_profile(store: &ModelStore) -> Option<&ModelProfile> {
     store
         .profiles
@@ -262,7 +206,8 @@ pub fn add_profile(input: ModelInput) -> Result<ModelStore, String> {
         base_url: base_url.clone(),
         api_key: input.api_key,
         model_id: model_id.clone(),
-        litellm_model: litellm_model(&base_url, &model_id),
+        protocol: input.protocol,
+        auth_mode: input.auth_mode,
         routing_enabled: input.routing_enabled,
         routing_weight: input.routing_weight.clamp(1, 100),
     };
@@ -286,7 +231,8 @@ pub fn update_profile(id: &str, input: ModelInput) -> Result<ModelStore, String>
     profile.base_url = base_url.clone();
     profile.api_key = input.api_key;
     profile.model_id = model_id.clone();
-    profile.litellm_model = litellm_model(&base_url, &model_id);
+    profile.protocol = input.protocol;
+    profile.auth_mode = input.auth_mode;
     profile.routing_enabled = input.routing_enabled;
     profile.routing_weight = input.routing_weight.clamp(1, 100);
     save_store(&store)?;
@@ -589,7 +535,8 @@ pub fn import_profiles(
             base_url: base_url.clone(),
             api_key: api_key.trim().to_string(),
             model_id: mid.to_string(),
-            litellm_model: litellm_model(&base_url, mid),
+            protocol: UpstreamProtocol::OpenaiChat,
+            auth_mode: UpstreamAuthMode::Auto,
             routing_enabled: true,
             routing_weight: default_routing_weight(),
         };

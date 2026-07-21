@@ -28,12 +28,6 @@ jobs:
             throw "Tag $tag does not match VERSION v$version"
           }
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
       - name: Set up Node 20
         uses: actions/setup-node@v4
         with:
@@ -51,7 +45,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             desktop-tauri/src-tauri/target
-          key: ${{ runner.os }}-cargo-studio-${{ hashFiles('desktop-tauri/src-tauri/Cargo.lock') }}
+            native-gateway/target
+          key: ${{ runner.os }}-cargo-studio-${{ hashFiles('desktop-tauri/src-tauri/Cargo.lock', 'native-gateway/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-studio-
 
@@ -139,6 +134,8 @@ jobs:
           $version = $tag -replace '^v',''
           $releaseTitle = "V$version"
           if ($version -eq '2.0.0') { $releaseTitle = 'V2.0.0 "Nova"' }
+          $releaseFlags = @()
+          if ($version -match '-') { $releaseFlags += '--prerelease' }
           $releaseNotesPath = "docs/RELEASE_v$version.md"
           if (Test-Path -LiteralPath $releaseNotesPath) {
             $notes = Get-Content -LiteralPath $releaseNotesPath -Raw
@@ -154,7 +151,7 @@ jobs:
               break
             }
             Write-Host "Create release attempt $attempt of 5"
-            gh release create $tag --title $releaseTitle --notes $notes
+            gh release create $tag --title $releaseTitle --notes $notes @releaseFlags
             if ($LASTEXITCODE -eq 0) {
               $releaseReady = $true
               break
@@ -169,7 +166,7 @@ jobs:
           }
           if (-not $releaseReady) { throw "Unable to create or find release $tag after retries" }
 
-          gh release edit $tag --title $releaseTitle --notes $notes
+          gh release edit $tag --title $releaseTitle --notes $notes @releaseFlags
           if ($LASTEXITCODE -ne 0) { throw "Unable to refresh release title and notes for $tag" }
 
           $releaseAssets = @((gh release view $tag --json assets | ConvertFrom-Json).assets)
@@ -191,132 +188,6 @@ jobs:
               }
               # The upload endpoint can return 502/503 after storing the file.
               # Verify by name before treating the attempt as failed.
-              $assetJson = gh release view $tag --json assets 2>$null
-              if ($LASTEXITCODE -eq 0) {
-                $assetNames = @((ConvertFrom-Json $assetJson).assets | ForEach-Object name)
-                if ($assetNames -contains ([System.IO.Path]::GetFileName($file))) {
-                  Write-Host "Upload response failed, but GitHub reports the asset present"
-                  $uploaded = $true
-                  break
-                }
-              }
-              if ($attempt -lt 5) { Start-Sleep -Seconds ([Math]::Min(30, 5 * $attempt)) }
-            }
-            if (-not $uploaded) { throw "Unable to upload $file after retries" }
-          }
-
-  legacy-portable-windows-x64:
-    runs-on: windows-2022
-    timeout-minutes: 45
-    continue-on-error: true
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Set up build Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Build and test portable package
-        shell: pwsh
-        run: ./scripts/build-portable.ps1
-
-      - name: Install Inno Setup
-        shell: pwsh
-        run: |
-          choco install innosetup -y --no-progress
-          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed: $LASTEXITCODE" }
-
-      - name: Build legacy branded EXE installer
-        shell: pwsh
-        run: |
-          $version = (Get-Content VERSION -Raw).Trim()
-          $pf86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
-          $iscc = @(
-            (Join-Path $pf86 "Inno Setup 6\ISCC.exe"),
-            (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
-          ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
-          if (-not $iscc) { throw "ISCC.exe not found" }
-          ./scripts/build-installer.ps1 -PayloadDirectory "dist/codex-chat-gateway-portable-v$version" -InnoCompiler $iscc
-
-      - name: Upload legacy artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: codex-chat-gateway-legacy-windows-x64
-          path: |
-            dist/*.7z
-            dist/*.sha256
-            dist-installer/CodexChatGateway-Setup-v*.exe
-            dist-installer/CodexChatGateway-Setup-v*.exe.sha256
-          if-no-files-found: warn
-
-      - name: Attach legacy files to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        continue-on-error: true
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $tag = $env:GITHUB_REF_NAME
-          $files = @(
-            Get-ChildItem dist -File -ErrorAction SilentlyContinue |
-              Where-Object { $_.Extension -eq '.7z' -or $_.Name -like '*.sha256' } |
-              ForEach-Object FullName
-          )
-          $files += @(
-            Get-ChildItem dist-installer -File -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -like 'CodexChatGateway-Setup-v*' } |
-              ForEach-Object FullName
-          )
-          if ($files.Count -eq 0) {
-            Write-Host "No legacy files to upload"
-            exit 0
-          }
-          $version = $tag -replace '^v',''
-          $releaseTitle = "V$version"
-          if ($version -eq '2.0.0') { $releaseTitle = 'V2.0.0 "Nova"' }
-          $releaseNotesPath = "docs/RELEASE_v$version.md"
-          if (Test-Path -LiteralPath $releaseNotesPath) {
-            $notes = Get-Content -LiteralPath $releaseNotesPath -Raw
-          } else {
-            $notes = "Codex Chat Gateway Studio $tag`n`n" + (./scripts/release-notes.ps1 -Version $version)
-          }
-
-          # Both jobs run in parallel, so either one must tolerate the other
-          # creating the release between the view and create calls.
-          $releaseReady = $false
-          for ($attempt = 1; $attempt -le 5; $attempt++) {
-            gh release view $tag *> $null
-            if ($LASTEXITCODE -eq 0) {
-              $releaseReady = $true
-              break
-            }
-            Write-Host "Create release attempt $attempt of 5"
-            gh release create $tag --title $releaseTitle --notes $notes
-            if ($LASTEXITCODE -eq 0) {
-              $releaseReady = $true
-              break
-            }
-            gh release view $tag *> $null
-            if ($LASTEXITCODE -eq 0) {
-              $releaseReady = $true
-              break
-            }
-            if ($attempt -lt 5) { Start-Sleep -Seconds ([Math]::Min(30, 5 * $attempt)) }
-          }
-          if (-not $releaseReady) { throw "Unable to create or find release $tag after retries" }
-
-          foreach ($file in $files) {
-            $uploaded = $false
-            for ($attempt = 1; $attempt -le 5; $attempt++) {
-              Write-Host "Upload $file attempt $attempt of 5"
-              gh release upload $tag $file --clobber
-              if ($LASTEXITCODE -eq 0) {
-                $uploaded = $true
-                break
-              }
               $assetJson = gh release view $tag --json assets 2>$null
               if ($LASTEXITCODE -eq 0) {
                 $assetNames = @((ConvertFrom-Json $assetJson).assets | ForEach-Object name)

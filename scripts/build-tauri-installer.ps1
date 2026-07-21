@@ -1,12 +1,10 @@
 param(
     [string]$OutputDirectory = '',
     [string]$InnoCompiler = '',
-    [switch]$SkipTauriBuild,
-    [switch]$SkipRuntimeBootstrap
+    [switch]$SkipTauriBuild
 )
 
-# Builds the STUDIO (Tauri + LobeHub) installer.
-# Never packages the legacy C#/WPF UI.
+# Builds the only supported product: Tauri Studio + native Rust gateway.
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -39,9 +37,10 @@ if (-not $outputRoot.StartsWith($projectPath, [StringComparison]::OrdinalIgnoreC
 }
 
 $version = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Trim()
-if ($version -notmatch '^\d+\.\d+\.\d+$') {
+if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
     throw "Invalid VERSION: $version"
 }
+$numericVersion = (($version -split '-', 2)[0]) + '.0'
 
 # Keep tauri.conf.json / Cargo.toml in lockstep with the root VERSION.
 & (Join-Path $PSScriptRoot 'sync-versions.ps1') -ProjectRoot $projectRoot
@@ -54,7 +53,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $tauriDir 'package.json'))) {
 Write-Host ''
 Write-Host '=== Codex Chat Gateway STUDIO installer ===' -ForegroundColor Cyan
 Write-Host "Version: $version"
-Write-Host 'UI:      Tauri + LobeHub (NOT legacy C#/WPF)'
+Write-Host 'Runtime: Tauri Studio + native Rust gateway'
 Write-Host ''
 
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
@@ -110,45 +109,26 @@ if (-not (Test-Path -LiteralPath $tauriExe)) {
 $tauriSize = (Get-Item -LiteralPath $tauriExe).Length
 $minBytes = 5 * 1024 * 1024
 if ($tauriSize -lt $minBytes) {
-    throw "Refusing binary that looks like legacy WPF (size=$tauriSize). Expected Tauri exe > 5MB. Path: $tauriExe"
+    throw "Refusing unexpected Studio binary (size=$tauriSize). Expected Tauri exe > 5MB. Path: $tauriExe"
 }
 
 $sizeMb = [math]::Round($tauriSize / 1MB, 1)
 Write-Host "Studio console binary: $tauriExe ($sizeMb MB)" -ForegroundColor Green
 
-# 2) Embedded Python runtime (LiteLLM) - NEVER via build-portable (WPF)
-$runtimeDir = Join-Path $projectRoot 'runtime'
-$runtimeSource = $null
-if (Test-Path -LiteralPath (Join-Path $runtimeDir 'python.exe')) {
-    $runtimeSource = $runtimeDir
-    Write-Host "Using existing project runtime: $runtimeSource"
+# 2) Build the standalone native gateway. It remains running when Studio exits.
+$nativeManifest = Join-Path $projectRoot 'native-gateway\Cargo.toml'
+Write-Host 'cargo build --release (native gateway)...'
+cargo build --release --manifest-path $nativeManifest
+if ($LASTEXITCODE -ne 0) {
+    throw 'Native gateway build failed.'
 }
-else {
-    $runtimeSource = Join-Path $outputRoot "studio-runtime-v$version"
-    if (Test-Path -LiteralPath (Join-Path $runtimeSource 'python.exe')) {
-        Write-Host "Using cached versioned runtime: $runtimeSource"
-    }
-    else {
-        if ($SkipRuntimeBootstrap) {
-            throw 'runtime\python.exe and cached versioned runtime are missing. Remove -SkipRuntimeBootstrap or run build-embedded-runtime.ps1 first.'
-        }
-        Write-Host 'Building embedded Python runtime (no C#/WPF desktop)...' -ForegroundColor Yellow
-        & (Join-Path $PSScriptRoot 'build-embedded-runtime.ps1') -DestinationRuntimeDir $runtimeSource
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Embedded runtime build failed.'
-        }
-    }
+$nativeExe = Join-Path $projectRoot 'native-gateway\target\release\ccg-native-gateway.exe'
+if (-not (Test-Path -LiteralPath $nativeExe)) {
+    throw "Native gateway executable not found: $nativeExe"
 }
 
-if (-not (Test-Path -LiteralPath (Join-Path $runtimeSource 'python.exe'))) {
-    throw "Runtime incomplete: $runtimeSource"
-}
-
-# 3) Assemble Studio payload
+# 3) Assemble the minimal Studio payload.
 $rootFiles = @(
-    'run_gateway.py',
-    'gateway_runtime.py',
-    'config.yaml',
     'VERSION',
     'LICENSE',
     'THIRD_PARTY_NOTICES.md'
@@ -161,17 +141,10 @@ foreach ($name in $rootFiles) {
 }
 $runtimeScripts = @(
     'check.ps1',
-    'claude_desktop_config.py',
-    'configure_codex.py',
-    'configure-claude-desktop.ps1',
-    'configure-codex.ps1',
     'disable-autostart.ps1',
     'enable-autostart.ps1',
-    'model-store.ps1',
-    'restore_codex.py',
-    'restore-claude-desktop.ps1',
-    'restore-codex.ps1',
     'start-background.ps1',
+    'status.ps1',
     'stop-background.ps1'
 )
 $stageScripts = Join-Path $stage 'scripts'
@@ -187,23 +160,9 @@ foreach ($name in $runtimeScripts) {
 # Main app MUST be Tauri Studio
 $stageExe = Join-Path $stage 'CodexChatGateway.exe'
 Copy-Item -LiteralPath $tauriExe -Destination $stageExe -Force
-Copy-Item -LiteralPath $runtimeSource -Destination (Join-Path $stage 'runtime') -Recurse -Force
-$stageRuntime = Join-Path $stage 'runtime'
-$stageBytecode = @(Get-ChildItem -LiteralPath $stageRuntime -Recurse -File -Filter '*.pyc' -Force -ErrorAction SilentlyContinue)
-foreach ($item in $stageBytecode) {
-    Remove-Item -LiteralPath $item.FullName -Force
-}
-$stageCacheDirectories = @(
-    Get-ChildItem -LiteralPath $stageRuntime -Recurse -Directory -Filter '__pycache__' -Force -ErrorAction SilentlyContinue |
-        Sort-Object { $_.FullName.Length } -Descending
-)
-foreach ($item in $stageCacheDirectories) {
-    if (Test-Path -LiteralPath $item.FullName) {
-        Remove-Item -LiteralPath $item.FullName -Recurse -Force
-    }
-}
+Copy-Item -LiteralPath $nativeExe -Destination (Join-Path $stage 'ccg-native-gateway.exe') -Force
 
-$icon = Join-Path $projectRoot 'desktop\assets\gateway-logo.ico'
+$icon = Join-Path $projectRoot 'desktop-tauri\src-tauri\icons\icon.ico'
 if (Test-Path -LiteralPath $icon) {
     Copy-Item -LiteralPath $icon -Destination (Join-Path $stage 'gateway-logo.ico') -Force
 }
@@ -216,20 +175,18 @@ $unexpectedBatFiles = @(Get-ChildItem -LiteralPath $stage -Recurse -Filter '*.ba
 if ($unexpectedBatFiles.Count -gt 0) {
     throw "Studio payload must not contain BAT launchers: $($unexpectedBatFiles.FullName -join ', ')"
 }
-$unexpectedBytecode = @(
-    Get-ChildItem -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -eq '__pycache__' -or $_.Name -like '*.pyc' }
+$unexpectedPython = @(
+    Get-ChildItem -LiteralPath $stage -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -in @('.py', '.pyc', '.pyd') -or $_.Name -like 'python*.exe' }
 )
-if ($unexpectedBytecode.Count -gt 0) {
-    throw "Studio payload must not contain Python bytecode caches: $($unexpectedBytecode.FullName -join ', ')"
+if ($unexpectedPython.Count -gt 0) {
+    throw "Studio payload must not contain Python runtime files: $($unexpectedPython.FullName -join ', ')"
 }
 $allowedTopLevelFiles = @(
     'CodexChatGateway.exe',
-    'config.yaml',
+    'ccg-native-gateway.exe',
     'gateway-logo.ico',
-    'gateway_runtime.py',
     'LICENSE',
-    'run_gateway.py',
     'STUDIO',
     'THIRD_PARTY_NOTICES.md',
     'VERSION'
@@ -243,7 +200,7 @@ if ($unexpectedTopLevelFiles.Count -gt 0) {
 }
 $unexpectedTopLevelDirectories = @(
     Get-ChildItem -LiteralPath $stage -Directory -Force |
-        Where-Object { $_.Name -notin @('runtime', 'scripts') }
+        Where-Object { $_.Name -notin @('scripts') }
 )
 if ($unexpectedTopLevelDirectories.Count -gt 0) {
     throw "Unexpected Studio payload directories: $($unexpectedTopLevelDirectories.Name -join ', ')"
@@ -253,14 +210,10 @@ $stageSize = (Get-Item -LiteralPath $stageExe).Length
 if ($stageSize -ne $tauriSize) {
     throw "Payload CodexChatGateway.exe size mismatch (stage=$stageSize tauri=$tauriSize). Aborting."
 }
-if ($stageSize -lt $minBytes) {
-    throw "Payload looks like legacy WPF ($stageSize bytes). Aborting."
-}
-
 $stageMb = [math]::Round($stageSize / 1MB, 1)
-Write-Host "Payload main exe verified: $stageExe ($stageMb MB) = Tauri Studio" -ForegroundColor Green
+Write-Host "Payload verified: Studio $stageMb MB + native gateway" -ForegroundColor Green
 
-# 4) Compile Inno Setup (Studio script only)
+# 4) Compile the Studio installer.
 if (-not $InnoCompiler) {
     $candidates = @(
         (Join-Path $env:ProgramFiles 'Inno Setup 7\ISCC.exe'),
@@ -291,6 +244,7 @@ foreach ($path in @($installerPath, $hashPath)) {
 Write-Host 'Compiling Inno Studio installer...'
 $arguments = @(
     "/DAppVersion=$version",
+    "/DAppNumericVersion=$numericVersion",
     "/DPayloadDir=$stage",
     "/DOutputDir=$outputRoot",
     $installerScript
@@ -305,14 +259,12 @@ $hash = Get-Sha256Hash -Path $installerPath
 
 Write-Host ''
 Write-Host '========================================' -ForegroundColor Green
-Write-Host ' STUDIO build complete (Tauri + LobeHub)' -ForegroundColor Green
+Write-Host ' STUDIO build complete (Tauri + native Rust)' -ForegroundColor Green
 Write-Host '========================================' -ForegroundColor Green
 Write-Host "Payload:   $stage"
 Write-Host "Main EXE:  $stageExe  ($stageMb MB)"
 Write-Host "Installer: $installerPath"
 Write-Host "SHA-256:   $hash"
 Write-Host ''
-Write-Host 'NOTE: Do NOT use dist-installer\portable* or CodexChatGateway-Setup-v1.2.0.exe' -ForegroundColor Yellow
-Write-Host '      Those are the legacy C#/WPF packages.' -ForegroundColor Yellow
 Write-Host 'Run the Studio Setup above, or launch:' -ForegroundColor Yellow
 Write-Host "  $stageExe" -ForegroundColor Yellow

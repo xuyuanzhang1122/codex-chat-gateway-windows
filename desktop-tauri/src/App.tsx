@@ -19,7 +19,6 @@ import {
 import {
   Activity,
   AlertTriangle,
-  Bot,
   CheckCircle2,
   Copy,
   ExternalLink,
@@ -43,7 +42,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
-import { InputNumber, Switch } from "antd";
+import { InputNumber, Select, Switch } from "antd";
 import { api } from "./api";
 import { TitleBar } from "./TitleBar";
 import { RoutingMapView } from "./RoutingMap";
@@ -58,6 +57,8 @@ import type {
   ParsedApiText,
   ProjectInfo,
   RoutingTrafficStore,
+  UpstreamAuthMode,
+  UpstreamProtocol,
 } from "./types";
 
 type Page = "gateway" | "routing" | "models" | "clients" | "activity";
@@ -615,13 +616,6 @@ function App() {
                         pushLog("ERR", String(e));
                       }
                     }}
-                    onUi={() => {
-                      const base = (status.endpoint || "http://127.0.0.1:4000/v1").replace(
-                        /\/v1\/?$/,
-                        "",
-                      );
-                      void openUrl(`${base}/ui`);
-                    }}
                   />
                 )}
 
@@ -1050,7 +1044,7 @@ const PageHeader = memo(function PageHeader({
   status: GatewayStatus;
 }) {
   const meta = {
-    gateway: { title: "网关运行时", sub: "本机 LiteLLM 进程 · 仅 127.0.0.1" },
+    gateway: { title: "网关运行时", sub: "原生 Rust 协议路由 · 仅 127.0.0.1" },
     routing: { title: "分流预览", sub: "真实选路轨迹 · 模型 → 上游网站" },
     models: { title: "上游模型", sub: "密钥保存在 .gateway/models.json" },
     clients: { title: "客户端接入", sub: "Codex / Claude Desktop · 可安全恢复" },
@@ -1123,7 +1117,6 @@ function GatewayView({
   onRestart,
   onCheck,
   onLogs,
-  onUi,
 }: {
   status: GatewayStatus;
   store: ModelStore;
@@ -1137,7 +1130,6 @@ function GatewayView({
   onRestart: () => void;
   onCheck: () => void;
   onLogs: () => void;
-  onUi: () => void;
 }) {
   const defaultName =
     status.default_model_name ||
@@ -1230,7 +1222,7 @@ function GatewayView({
             />
           </div>
           <div className="gateway-startup-note">
-            首次启动需要加载本地 Python 与 LiteLLM，后续启动会更快。请保持窗口开启。
+            正在绑定本地端口并加载协议路由，通常不到一秒即可就绪。
           </div>
         </div>
       )}
@@ -1292,9 +1284,6 @@ function GatewayView({
               onClick={onLogs}
             >
               日志目录
-            </Button>
-            <Button icon={Bot} variant="outlined" onClick={onUi}>
-              LiteLLM UI
             </Button>
           </Flexbox>
           <FeedbackAlert
@@ -1639,7 +1628,11 @@ function ModelsView({
                       {p.model_id}
                     </Text>
                     <Text type="secondary" fontSize={11} ellipsis>
-                      {p.litellm_model}
+                      {p.protocol === "anthropic_messages"
+                        ? "Anthropic Messages · 原生优先"
+                        : p.protocol === "openai_responses"
+                          ? "OpenAI Responses · 原生优先"
+                          : "OpenAI Chat Completions"}
                     </Text>
                     <Text type="secondary" fontSize={11} ellipsis>
                       {p.base_url}
@@ -1967,6 +1960,8 @@ function ModelDialog({
   const [url, setUrl] = useState(profile?.base_url ?? "");
   const [key, setKey] = useState(profile?.api_key ?? "");
   const [modelId, setModelId] = useState(profile?.model_id ?? "");
+  const [protocol, setProtocol] = useState<UpstreamProtocol>(profile?.protocol ?? "openai_chat");
+  const [authMode, setAuthMode] = useState<UpstreamAuthMode>(profile?.auth_mode ?? "auto");
   const [routingEnabled, setRoutingEnabled] = useState(profile?.routing_enabled ?? true);
   const [routingWeight, setRoutingWeight] = useState(profile?.routing_weight ?? 1);
   const [msg, setMsg] = useState<string>("");
@@ -2036,6 +2031,8 @@ function ModelDialog({
                         base_url: url.trim().replace(/\/+$/, ""),
                         api_key: key,
                         model_id: modelId.trim(),
+                        protocol,
+                        auth_mode: authMode,
                         routing_enabled: routingEnabled,
                         routing_weight: Math.max(1, Math.min(100, routingWeight || 1)),
                       },
@@ -2114,6 +2111,31 @@ function ModelDialog({
                 在线获取
               </Button>
             </Flexbox>
+          </FormItem>
+          <FormItem label="上游协议">
+            <Select
+              value={protocol}
+              onChange={setProtocol}
+              options={[
+                { value: "openai_chat", label: "OpenAI Chat Completions" },
+                { value: "openai_responses", label: "OpenAI Responses（原生）" },
+                { value: "anthropic_messages", label: "Anthropic Messages（原生）" },
+              ]}
+            />
+            <Text type="secondary" fontSize={11}>
+              与客户端协议相同时直接透传；不同时才启用 Rust 协议转换。
+            </Text>
+          </FormItem>
+          <FormItem label="认证方式">
+            <Select
+              value={authMode}
+              onChange={setAuthMode}
+              options={[
+                { value: "auto", label: "自动（推荐）" },
+                { value: "bearer", label: "Authorization: Bearer" },
+                { value: "x_api_key", label: "x-api-key（Anthropic）" },
+              ]}
+            />
           </FormItem>
           <FormItem label="同模型分流">
             <Flexbox horizontal distribution="space-between" align="center" gap={12}>

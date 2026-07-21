@@ -1,0 +1,23 @@
+[package]
+name = "ccg-native-gateway"
+version = "2.1.0-beta.1"
+edition = "2021"
+license = "MIT"
+description = "Native protocol-aware gateway for Codex Chat Gateway"
+
+[dependencies]
+async-stream = "0.3"
+axum = "0.7"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+eventsource-stream = "0.2"
+futures-util = "0.3"
+linguafranca = "=0.3.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

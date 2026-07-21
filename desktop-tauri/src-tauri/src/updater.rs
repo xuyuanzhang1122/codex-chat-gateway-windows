@@ -72,8 +72,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 /// (`{ downloaded, total, verified? }`).
 #[tauri::command]
 pub async fn download_studio_installer(app: AppHandle, version: String) -> Result<(), String> {
-    let parts: Vec<&str> = version.split('.').collect();
-    if parts.len() != 3 || !parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) {
+    if !valid_release_version(&version) {
         return Err(format!("非法版本号: {version}"));
     }
 
@@ -93,7 +92,9 @@ pub async fn download_studio_installer(app: AppHandle, version: String) -> Resul
     let mut downloaded: u64 = 0;
     let mut buf = [0u8; 256 * 1024];
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("下载中断: {e}"))?;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("下载中断: {e}"))?;
         if n == 0 {
             break;
         }
@@ -125,4 +126,40 @@ pub async fn download_studio_installer(app: AppHandle, version: String) -> Resul
         .map_err(|e| format!("无法启动安装器 {}: {e}", dest.display()))?;
     app.exit(0);
     Ok(())
+}
+
+fn valid_release_version(version: &str) -> bool {
+    let (core, prerelease) = version
+        .split_once('-')
+        .map_or((version, None), |(core, suffix)| (core, Some(suffix)));
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() != 3
+        || !parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+    prerelease.is_none_or(|suffix| {
+        !suffix.is_empty()
+            && !suffix.starts_with('.')
+            && !suffix.ends_with('.')
+            && !suffix.contains("..")
+            && suffix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_release_version;
+
+    #[test]
+    fn accepts_stable_and_prerelease_versions() {
+        assert!(valid_release_version("2.1.0"));
+        assert!(valid_release_version("2.1.0-beta.1"));
+        assert!(!valid_release_version("2.1"));
+        assert!(!valid_release_version("2.1.0/evil"));
+    }
 }

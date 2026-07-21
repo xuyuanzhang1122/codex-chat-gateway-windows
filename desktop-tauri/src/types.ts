@@ -4,10 +4,14 @@ export interface ModelProfile {
   base_url: string;
   api_key: string;
   model_id: string;
-  litellm_model: string;
+  protocol: UpstreamProtocol;
+  auth_mode: UpstreamAuthMode;
   routing_enabled: boolean;
   routing_weight: number;
 }
+
+export type UpstreamProtocol = "openai_chat" | "openai_responses" | "anthropic_messages";
+export type UpstreamAuthMode = "auto" | "bearer" | "x_api_key";
 
 export interface RoutingSettings {
   enabled: boolean;
@@ -32,6 +36,8 @@ export interface ModelInput {
   base_url: string;
   api_key: string;
   model_id: string;
+  protocol: UpstreamProtocol;
+  auth_mode: UpstreamAuthMode;
   routing_enabled: boolean;
   routing_weight: number;
 }

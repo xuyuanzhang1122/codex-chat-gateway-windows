@@ -1,13 +1,12 @@
-//! Native gateway process manager.
+//! Native Rust gateway process manager.
 //!
-//! Protocol conversion still runs in the bundled LiteLLM process (`run_gateway.py`).
-//! Lifecycle, health, state persistence and UI snapshots are owned by this module —
-//! no PowerShell involved for start/stop/status.
+//! The standalone gateway keeps running when Studio exits. Lifecycle, health,
+//! state persistence and UI snapshots are owned here without Python or LiteLLM.
 
-use crate::models::{claude_litellm_model, default_profile, read_store, ModelStore};
+use crate::models::{default_profile, read_store, ModelStore};
 use crate::paths::{
-    config_yaml, logs_dir, normalize_path_text, normalize_text, project_root,
-    project_root_display, python_runtime, run_gateway_py, state_path, strip_extended_prefix,
+    logs_dir, native_gateway_binary, normalize_path_text, normalize_text, project_root,
+    project_root_display, state_path, strip_extended_prefix,
 };
 use chrono::{DateTime, Local, Utc};
 use parking_lot::RwLock;
@@ -23,7 +22,6 @@ use std::time::{Duration, Instant};
 use sysinfo::{ProcessesToUpdate, System};
 use tauri::{AppHandle, Emitter};
 
-pub const GATEWAY_HOST: &str = "127.0.0.1";
 pub const GATEWAY_PORT: u16 = 4000;
 pub const ENDPOINT: &str = "http://127.0.0.1:4000";
 pub const ENDPOINT_V1: &str = "http://127.0.0.1:4000/v1";
@@ -222,8 +220,7 @@ impl GatewayManager {
                         g.status.pid = Some(file.pid);
                         g.status.model = Some(file.model);
                         g.status.started_at = Some(file.started_at);
-                        g.status.is_our_gateway =
-                            process_is_our_gateway(&project_root(), file.pid);
+                        g.status.is_our_gateway = process_is_our_gateway(&project_root(), file.pid);
                     }
                 }
             } else if let Some(pid) = g.status.pid {
@@ -412,7 +409,7 @@ impl GatewayManager {
         }
     }
 
-    /// Apply models.json to the already-running LiteLLM Router. The local
+    /// Apply models.json to the already-running native router. The local
     /// aliases and listening socket stay alive, so clients do not disconnect.
     pub fn reload_live_config(&self, app: &AppHandle) -> ActionResult {
         emit_log(app, "INFO", "▶ 热更新上游路由");
@@ -475,7 +472,7 @@ impl GatewayManager {
         if let Ok(store) = read_store() {
             if let Some(profile) = default_profile(&store) {
                 if let Some(mut state) = read_state_file(&root) {
-                    state.model = profile.litellm_model.clone();
+                    state.model = profile.model_id.clone();
                     let _ = write_state_file(&root, &state);
                 }
                 self.set_default_name(Some(profile.name.clone()));
@@ -567,21 +564,15 @@ impl GatewayManager {
             self.fail_start(app, "尚未配置默认模型，请先添加模型");
             return;
         };
-        let Some(python) = python_runtime(&root) else {
-            self.fail_start(app, "缺少 Python 运行时（runtime/ 或 .venv）");
+        let Some(native_gateway) = native_gateway_binary(&root) else {
+            self.fail_start(app, "缺少原生网关程序 ccg-native-gateway");
             return;
         };
-        let runner = run_gateway_py(&root);
-        let config = config_yaml(&root);
-        if !runner.is_file() || !config.is_file() {
-            self.fail_start(app, "缺少 run_gateway.py 或 config.yaml");
-            return;
-        }
 
         {
             let mut g = self.inner.write();
-            g.status.startup_progress = Some(16);
-            g.status.startup_stage = Some("检查模型配置与 Python 运行时".into());
+            g.status.startup_progress = Some(25);
+            g.status.startup_stage = Some("检查模型配置与原生网关".into());
             g.status.message = "正在检查启动环境…".into();
         }
         emit_status(app, &self.snapshot());
@@ -606,28 +597,12 @@ impl GatewayManager {
             }
         };
 
-        let mut cmd = Command::new(&python);
-        cmd.arg(&runner)
-            .arg("--config")
-            .arg(&config)
-            .arg("--host")
-            .arg(GATEWAY_HOST)
-            .arg("--port")
-            .arg(GATEWAY_PORT.to_string())
-            .current_dir(&root)
+        let mut cmd = Command::new(&native_gateway);
+        cmd.current_dir(&root)
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))
-            .env("UPSTREAM_MODEL", &profile.litellm_model)
-            .env(
-                "CLAUDE_UPSTREAM_MODEL",
-                claude_litellm_model(&profile.litellm_model),
-            )
-            .env("UPSTREAM_BASE_URL", &profile.base_url)
-            .env("UPSTREAM_API_KEY", &profile.api_key)
-            .env("GATEWAY_HOST", GATEWAY_HOST)
-            .env("GATEWAY_PORT", GATEWAY_PORT.to_string())
-            .env("LITELLM_LOCAL_MODEL_COST_MAP", "True")
-            .env("LITELLM_DONT_SHOW_FEEDBACK_BOX", "True");
+            .env("CCG_ROOT", &root)
+            .env("CCG_PORT", GATEWAY_PORT.to_string());
 
         #[cfg(windows)]
         {
@@ -650,14 +625,12 @@ impl GatewayManager {
 
         let state = GatewayStateFile {
             pid,
-            executable: strip_extended_prefix(python.clone())
+            executable: strip_extended_prefix(native_gateway.clone())
                 .to_string_lossy()
                 .into_owned(),
-            runner: strip_extended_prefix(runner.clone())
-                .to_string_lossy()
-                .into_owned(),
+            runner: "native-rust".into(),
             endpoint: ENDPOINT.into(),
-            model: profile.litellm_model.clone(),
+            model: profile.model_id.clone(),
             started_at: started_at.clone(),
         };
         if let Err(e) = write_state_file(&root, &state) {
@@ -668,31 +641,35 @@ impl GatewayManager {
             let mut g = self.inner.write();
             g.child = Some(child);
             g.status.pid = Some(pid);
-            g.status.model = Some(profile.litellm_model.clone());
+            g.status.model = Some(profile.model_id.clone());
             g.status.started_at = Some(started_at);
             g.status.default_model_name = Some(profile.name.clone());
             g.default_name = Some(profile.name.clone());
-            g.status.startup_progress = Some(28);
-            g.status.startup_stage = Some("加载 LiteLLM 与路由配置".into());
+            g.status.startup_progress = Some(55);
+            g.status.startup_stage = Some("启动 Rust 路由与协议适配器".into());
             g.status.message = "网关进程已创建，正在等待接口就绪…".into();
         }
         emit_status(app, &self.snapshot());
 
         // Wait for readiness without blocking UI (we're already on worker thread)
         let mut ready = false;
-        for attempt in 0..50 {
-            thread::sleep(Duration::from_millis(200));
+        for attempt in 0..30 {
+            thread::sleep(Duration::from_millis(100));
             if !pid_alive(pid) {
-                emit_log(app, "ERR", &format!("进程在就绪前退出（attempt {attempt}）"));
+                emit_log(
+                    app,
+                    "ERR",
+                    &format!("进程在就绪前退出（attempt {attempt}）"),
+                );
                 break;
             }
             if attempt % 3 == 0 {
-                let progress = 30 + ((attempt as u8).saturating_mul(62) / 50);
+                let progress = 55 + ((attempt as u8).saturating_mul(40) / 30);
                 {
                     let mut g = self.inner.write();
                     g.status.startup_progress = Some(progress.min(92));
                     g.status.startup_stage = Some("等待本地接口和路由就绪".into());
-                    g.status.message = format!("首次加载可能较慢 · 启动检查 {}/50", attempt + 1);
+                    g.status.message = format!("正在确认原生接口 · 启动检查 {}/30", attempt + 1);
                 }
                 emit_status(app, &self.snapshot());
             }
@@ -712,8 +689,8 @@ impl GatewayManager {
             let _ = kill_verified(
                 &root,
                 pid,
-                Some(python.to_string_lossy().as_ref()),
-                Some(runner.to_string_lossy().as_ref()),
+                Some(native_gateway.to_string_lossy().as_ref()),
+                Some("native-rust"),
             );
             let _ = fs::remove_file(state_path(&root));
             {
@@ -744,8 +721,8 @@ impl GatewayManager {
             g.status.startup_progress = None;
             g.status.startup_stage = None;
             g.status.message = format!(
-                "运行中 · {} ({})",
-                profile.name, profile.litellm_model
+                "运行中 · {} ({}) · 原生 Rust",
+                profile.name, profile.model_id
             );
         }
         emit_log(
@@ -753,7 +730,7 @@ impl GatewayManager {
             "OK",
             &format!(
                 "网关已启动 {ENDPOINT_V1} · {} ({})",
-                profile.name, profile.litellm_model
+                profile.name, profile.model_id
             ),
         );
         emit_status(app, &self.snapshot());
@@ -790,8 +767,8 @@ impl GatewayManager {
         let mut killed = Vec::new();
 
         // Stop the owned child first. A live `Child` handle is stronger ownership
-        // evidence than a best-effort sysinfo cmdline lookup (pythonw cmdlines can
-        // be unavailable on Windows). Never call `wait()` on a process we skipped:
+        // evidence than a best-effort sysinfo cmdline lookup. Never call `wait()`
+        // on a process we skipped:
         // that would block the stop worker forever while the gateway is still live.
         {
             let mut g = self.inner.write();
@@ -812,8 +789,8 @@ impl GatewayManager {
             }
         }
 
-        // Multiple start paths (console / bat / autostart) can leave several run_gateway.py
-        // instances; stop must sweep all of them, not only the state-file PID.
+        // Studio and login autostart can leave a stale native gateway; stop must
+        // sweep all verified instances, not only the state-file PID.
         for round in 0..4 {
             if let Some(st) = read_state_file(&root) {
                 if !killed.contains(&st.pid) {
@@ -831,10 +808,7 @@ impl GatewayManager {
                         emit_log(
                             app,
                             "DIM",
-                            &format!(
-                                "state PID {} 未通过严格身份匹配，继续扫描发现路径",
-                                st.pid
-                            ),
+                            &format!("state PID {} 未通过严格身份匹配，继续扫描发现路径", st.pid),
                         );
                     }
                 }
@@ -850,9 +824,7 @@ impl GatewayManager {
                 }
             }
 
-
-            // Fallback: whatever listens on our gateway port and runs run_gateway.py
-            // IS a gateway instance (covers leftovers spawned by other install dirs).
+            // Fallback: verify the native executable that owns the gateway port.
             if let Some(pid) = find_port_listener_gateway_pid(&root, GATEWAY_PORT) {
                 if !killed.contains(&pid) && kill_pid_tree(pid) {
                     emit_log(
@@ -893,16 +865,11 @@ impl GatewayManager {
                 g.status.healthy = true;
                 // Only mark as ours when we still see our runner; otherwise port is foreign.
                 g.status.is_our_gateway = !leftover.is_empty()
-                    || list_routes()
-                        .map(|r| is_our_gateway(&r))
-                        .unwrap_or(false);
+                    || list_routes().map(|r| is_our_gateway(&r)).unwrap_or(false);
                 g.status.message = if leftover.is_empty() {
                     "停止后端口仍有响应（可能非本网关占用 4000）".into()
                 } else {
-                    format!(
-                        "停止未完成，仍有 {} 个网关相关进程",
-                        leftover.len()
-                    )
+                    format!("停止未完成，仍有 {} 个网关相关进程", leftover.len())
                 };
             } else {
                 g.status.phase = GatewayPhase::Stopped;
@@ -921,9 +888,7 @@ impl GatewayManager {
             emit_log(
                 app,
                 "ERR",
-                &format!(
-                    "停止后健康检查仍通过 · killed={killed:?} leftover={leftover:?}"
-                ),
+                &format!("停止后健康检查仍通过 · killed={killed:?} leftover={leftover:?}"),
             );
             emit_status(app, &self.snapshot());
             emit_action(app, false, "停止失败：端口 4000 仍有响应");
@@ -944,10 +909,7 @@ impl GatewayManager {
 
     /// Background watcher: cheap probes + push events only on change.
     pub fn start_watcher(self: &Arc<Self>, app: AppHandle) {
-        if self
-            .watcher_started
-            .swap(true, Ordering::SeqCst)
-        {
+        if self.watcher_started.swap(true, Ordering::SeqCst) {
             return;
         }
         let mgr = Arc::clone(self);
@@ -1059,19 +1021,19 @@ fn ensure_state_for_running(root: &Path) -> Result<(), String> {
     if !process_is_our_gateway(root, pid) {
         return Err("发现的进程未能通过网关身份校验".into());
     }
-    let python = python_runtime(root)
-        .map(|p| p.to_string_lossy().to_string())
+    let executable = native_gateway_binary(root)
+        .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_default();
-    let runner = run_gateway_py(root).to_string_lossy().to_string();
+    let runner = "native-rust".to_string();
     let model = read_store()
         .ok()
-        .and_then(|s| default_profile(&s).map(|p| p.litellm_model.clone()))
+        .and_then(|s| default_profile(&s).map(|p| p.model_id.clone()))
         .unwrap_or_default();
     write_state_file(
         root,
         &GatewayStateFile {
             pid,
-            executable: python,
+            executable,
             runner,
             endpoint: ENDPOINT.into(),
             model,
@@ -1087,8 +1049,7 @@ fn pid_alive(pid: u32) -> bool {
     sys.process(handle).is_some()
 }
 
-/// Kill only after identity checks. When exe/runner are provided, both path and cmdline must match.
-/// When omitted (discovery), cmdline must prove this project's `run_gateway.py`.
+/// Kill only after executable identity checks.
 fn kill_verified(
     root: &Path,
     pid: u32,
@@ -1133,8 +1094,7 @@ fn stop_owned_child(child: &mut std::process::Child) -> OwnedChildStop {
     }
 }
 
-/// Kill the process and its children. On Windows, prefer `taskkill /T /F` so
-/// orphaned python/litellm workers on port 4000 do not keep the health probe green.
+/// Kill the process and its children. On Windows, prefer `taskkill /T /F`.
 fn kill_pid_tree(pid: u32) -> bool {
     #[cfg(windows)]
     {
@@ -1163,10 +1123,8 @@ fn kill_pid_tree(pid: u32) -> bool {
     !pid_alive(pid)
 }
 
-/// Dual check: executable path (python/pythonw tolerant) + cmdline contains our runner under root.
-/// On Windows, an exact runtime executable that owns the gateway port is accepted when
-/// sysinfo cannot expose pythonw's command line.
-fn process_matches(root: &Path, pid: u32, expected_exe: &str, expected_runner: &str) -> bool {
+/// Match the exact native executable. The runner marker is retained in state files.
+fn process_matches(_root: &Path, pid: u32, expected_exe: &str, expected_runner: &str) -> bool {
     let mut sys = System::new();
     let handle = sysinfo::Pid::from_u32(pid);
     sys.refresh_processes(ProcessesToUpdate::Some(&[handle]), true);
@@ -1182,18 +1140,11 @@ fn process_matches(root: &Path, pid: u32, expected_exe: &str, expected_runner: &
         return false;
     }
 
-    let runner_name = Path::new(expected_runner)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("run_gateway.py");
-    let cmd = process_cmdline(proc);
-    let cmd_n = normalize_text(&cmd);
-    let root_n = normalize_path_text(root);
-    let runner_n = normalize_text(expected_runner);
+    if expected_runner == "native-rust" {
+        return true;
+    }
 
-    let cmdline_matches = cmd_n.contains(&runner_name.to_ascii_lowercase())
-        && (cmd_n.contains(&root_n) || cmd_n.contains(&runner_n));
-    cmdline_matches || pid_listens_on_port(pid, GATEWAY_PORT)
+    pid_listens_on_port(pid, GATEWAY_PORT)
 }
 
 fn process_is_our_gateway(root: &Path, pid: u32) -> bool {
@@ -1203,14 +1154,17 @@ fn process_is_our_gateway(root: &Path, pid: u32) -> bool {
     let Some(proc) = sys.process(handle) else {
         return false;
     };
-    let cmd_n = normalize_text(&process_cmdline(proc));
-    let root_n = normalize_path_text(root);
-    let runner_n = normalize_path_text(&run_gateway_py(root));
-    let cmdline_matches = cmd_n.contains("run_gateway.py")
-        && (cmd_n.contains(&root_n) || cmd_n.contains(&runner_n));
-    cmdline_matches
-        || (process_executable_is_project_runtime(root, proc)
-            && pid_listens_on_port(pid, GATEWAY_PORT))
+    let native_match = native_gateway_binary(root)
+        .and_then(|expected| {
+            proc.exe().map(|actual| {
+                executable_identity_matches(
+                    &normalize_path_text(actual),
+                    &expected.to_string_lossy(),
+                )
+            })
+        })
+        .unwrap_or(false);
+    native_match && pid_listens_on_port(pid, GATEWAY_PORT)
 }
 
 fn executable_identity_matches(actual_exe: &str, expected_exe: &str) -> bool {
@@ -1223,41 +1177,7 @@ fn executable_identity_matches(actual_exe: &str, expected_exe: &str) -> bool {
         return true;
     }
 
-    let actual_path = Path::new(&actual);
-    let expected_path = Path::new(&expected);
-    let actual_stem = actual_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let expected_stem = expected_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if !actual_stem.starts_with("python") || !expected_stem.starts_with("python") {
-        return false;
-    }
-
-    let actual_dir = actual_path
-        .parent()
-        .map(normalize_path_text)
-        .unwrap_or_default();
-    let expected_dir = expected_path
-        .parent()
-        .map(normalize_path_text)
-        .unwrap_or_default();
-    !actual_dir.is_empty() && actual_dir == expected_dir
-}
-
-fn process_executable_is_project_runtime(root: &Path, proc: &sysinfo::Process) -> bool {
-    let actual_exe = proc
-        .exe()
-        .map(normalize_path_text)
-        .unwrap_or_default();
-    python_runtime(root)
-        .map(|expected| {
-            executable_identity_matches(&actual_exe, &expected.to_string_lossy())
-        })
-        .unwrap_or(false)
+    false
 }
 
 fn process_cmdline(proc: &sysinfo::Process) -> String {
@@ -1314,13 +1234,11 @@ fn pid_cmdline_is_gateway(pid: u32) -> bool {
     let handle = sysinfo::Pid::from_u32(pid);
     sys.refresh_processes(ProcessesToUpdate::Some(&[handle]), true);
     sys.process(handle)
-        .map(|proc| normalize_text(&process_cmdline(proc)).contains("run_gateway.py"))
+        .map(|proc| normalize_text(&process_cmdline(proc)).contains("ccg-native-gateway"))
         .unwrap_or(false)
 }
 
-/// Port ownership plus this installation's embedded/venv Python executable is a
-/// safe Windows fallback when the process command line cannot be inspected. A
-/// visible run_gateway.py cmdline remains sufficient for older install roots.
+/// Port ownership plus this installation's native executable is required.
 fn find_port_listener_gateway_pid(root: &Path, port: u16) -> Option<u32> {
     let pid = find_port_listener_pid(port)?;
     (process_is_our_gateway(root, pid) || pid_cmdline_is_gateway(pid)).then_some(pid)
@@ -1329,16 +1247,14 @@ fn find_port_listener_gateway_pid(root: &Path, port: u16) -> Option<u32> {
 fn find_all_gateway_pids(root: &Path) -> Vec<u32> {
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::All, true);
-    let runner_n = normalize_path_text(&run_gateway_py(root));
-    let root_n = normalize_path_text(root);
+    let native_n = native_gateway_binary(root)
+        .map(|path| normalize_path_text(&path))
+        .unwrap_or_default();
     let mut pids = Vec::new();
     for (pid, proc) in sys.processes() {
-        let cmd_n = normalize_text(&process_cmdline(proc));
-        if !cmd_n.contains("run_gateway.py") {
-            continue;
-        }
-        // Both sides normalized: no `\\?\`, lowercase, backslashes — so match works.
-        if cmd_n.contains(&root_n) || cmd_n.contains(&runner_n) {
+        let exe_n = proc.exe().map(normalize_path_text).unwrap_or_default();
+        let native_match = !native_n.is_empty() && exe_n == native_n;
+        if native_match {
             pids.push(pid.as_u32());
         }
     }
@@ -1552,18 +1468,18 @@ mod tests {
     use super::{executable_identity_matches, stop_owned_child, OwnedChildStop};
 
     #[test]
-    fn python_and_pythonw_in_same_runtime_are_same_identity() {
+    fn native_gateway_requires_exact_executable_identity() {
         assert!(executable_identity_matches(
-            r"C:\Program Files\Codex Chat Gateway\runtime\pythonw.exe",
-            r"C:\Program Files\Codex Chat Gateway\runtime\python.exe",
+            r"C:\Program Files\Codex Chat Gateway\ccg-native-gateway.exe",
+            r"C:\Program Files\Codex Chat Gateway\ccg-native-gateway.exe",
         ));
     }
 
     #[test]
-    fn python_in_another_runtime_is_not_same_identity() {
+    fn native_gateway_in_another_directory_is_not_same_identity() {
         assert!(!executable_identity_matches(
-            r"C:\Other App\runtime\pythonw.exe",
-            r"C:\Program Files\Codex Chat Gateway\runtime\python.exe",
+            r"C:\Other App\ccg-native-gateway.exe",
+            r"C:\Program Files\Codex Chat Gateway\ccg-native-gateway.exe",
         ));
     }
 

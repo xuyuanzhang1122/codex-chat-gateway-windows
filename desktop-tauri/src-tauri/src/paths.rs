@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 
-/// Resolve once and cache the gateway project root (config.yaml + scripts/).
+/// Resolve once and cache the Studio/native-gateway project root.
 /// Always returns a path **without** the Windows `\\?\` extended prefix so
 /// PowerShell `$PSScriptRoot` and process cmdline matching stay consistent.
 pub fn project_root() -> PathBuf {
@@ -87,7 +87,11 @@ pub fn normalize_text(s: &str) -> String {
 }
 
 fn is_project_root(path: &Path) -> bool {
-    path.join("config.yaml").is_file() && path.join("scripts").is_dir()
+    path.join("VERSION").is_file()
+        && path.join("scripts").is_dir()
+        && (path.join("desktop-tauri").is_dir()
+            || path.join("ccg-native-gateway.exe").is_file()
+            || path.join("ccg-native-gateway").is_file())
 }
 
 pub fn models_path(root: &Path) -> PathBuf {
@@ -102,24 +106,18 @@ pub fn logs_dir(root: &Path) -> PathBuf {
     root.join("logs")
 }
 
-pub fn config_yaml(root: &Path) -> PathBuf {
-    root.join("config.yaml")
-}
-
-pub fn run_gateway_py(root: &Path) -> PathBuf {
-    root.join("run_gateway.py")
-}
-
-pub fn python_runtime(root: &Path) -> Option<PathBuf> {
+pub fn native_gateway_binary(root: &Path) -> Option<PathBuf> {
     for rel in [
-        "runtime/pythonw.exe",
-        ".venv/Scripts/pythonw.exe",
-        "runtime/python.exe",
-        ".venv/Scripts/python.exe",
+        "ccg-native-gateway.exe",
+        "native-gateway/target/release/ccg-native-gateway.exe",
+        "native-gateway/target/debug/ccg-native-gateway.exe",
+        "ccg-native-gateway",
+        "native-gateway/target/release/ccg-native-gateway",
+        "native-gateway/target/debug/ccg-native-gateway",
     ] {
-        let p = root.join(rel);
-        if p.is_file() {
-            return Some(strip_extended_prefix(p));
+        let path = root.join(rel);
+        if path.is_file() {
+            return Some(strip_extended_prefix(path));
         }
     }
     None

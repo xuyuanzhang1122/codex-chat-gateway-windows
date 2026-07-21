@@ -3,6 +3,15 @@
 ## Unreleased
 
 
+## 2.1.0-beta.1 - 2026-07-21
+
+- 底层网关改为独立 Rust 原生进程，典型本机冒烟测试约 0.5 秒就绪；Studio 启动、退出与登录自启不再加载 Python、LiteLLM、FastAPI 或 Uvicorn。
+- 新增上游协议能力配置：OpenAI Responses、OpenAI Chat Completions、Anthropic Messages；同协议原生透传，跨协议才调用 `linguafranca` 转换请求、响应、SSE、工具调用和思考内容。
+- `models.json` 升级为 v4，上游可分别选择协议和认证方式；旧 v3 配置缺省迁移为 OpenAI Chat，不改写 API Key、默认模型与分流规则。
+- Codex 与 Claude Desktop 配置/恢复迁入 Studio Rust 后端，继续先备份并只修改本项目字段，不再为配置脚本携带 Python。
+- 停止维护并删除全部 BAT 入口、C# / WPF 控制台、legacy 便携包与发布 job；Studio + 原生 Rust 网关成为唯一发行形态。
+- Studio 安装载荷不再包含 Python runtime、LiteLLM、旧协议补丁和 Python 字节码；升级清理保留 `.gateway/models.json`、密钥与日志。
+
 ## 2.0.0 "Nova" - 2026-07-21
 
 - Studio 安装包改用严格运行时白名单，不再携带 BAT 启动器、开发文档、发布脚本和补丁目录；安装时提供默认勾选的旧版本清理选项，删除历史程序残留并保留 `.gateway` 模型配置、API 密钥、`.env` 与日志。

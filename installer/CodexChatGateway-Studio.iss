@@ -9,6 +9,9 @@
 #ifndef OutputDir
   #error OutputDir must be supplied by scripts/build-tauri-installer.ps1
 #endif
+#ifndef AppNumericVersion
+  #error AppNumericVersion must be supplied by scripts/build-tauri-installer.ps1
+#endif
 
 #define AppName "Codex Chat Gateway"
 #define AppExeName "CodexChatGateway.exe"
@@ -34,7 +37,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
 OutputBaseFilename=CodexChatGateway-Studio-Setup-v{#AppVersion}
-SetupIconFile=..\desktop\assets\gateway-logo.ico
+SetupIconFile=..\desktop-tauri\src-tauri\icons\icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 Compression=lzma2/normal
 SolidCompression=yes
@@ -52,8 +55,8 @@ WizardBackColor=#07070b
 WizardImageBackColor=#000000
 WizardSmallImageBackColor=#07070b
 WizardImageFile=assets\installer-hero.png
-WizardSmallImageFile=..\desktop\assets\gateway-logo.png
-VersionInfoVersion={#AppVersion}.0
+WizardSmallImageFile=..\desktop-tauri\src-tauri\icons\128x128.png
+VersionInfoVersion={#AppNumericVersion}
 VersionInfoCompany={#AppPublisher}
 VersionInfoDescription=Studio installer for Codex Chat Gateway (Tauri)
 VersionInfoProductName={#AppName} Studio
@@ -69,7 +72,7 @@ Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 [CustomMessages]
 english.SetupWindowTitle=Codex Chat Gateway Studio Setup
 english.WelcomeHeading=Studio console + local model bridge
-english.WelcomeBody=Installs the Tauri desktop console, LiteLLM runtime, and scripts.%n%n• Listens only on 127.0.0.1%n• Model keys stay on this PC%n• Close-to-tray keeps the gateway running
+english.WelcomeBody=Installs the Tauri desktop console and native Rust gateway.%n%n• Starts in under a second on typical PCs%n• Listens only on 127.0.0.1%n• Model keys stay on this PC
 english.FinishHeading=Studio is ready.
 english.FinishBody=Open the console, add a model, then start the gateway. Closing the window hides to tray and does not stop the gateway.
 english.ShortcutGroup=Shortcuts
@@ -81,10 +84,10 @@ english.SetupRunning=Codex Chat Gateway is currently open. Exit the console from
 english.BrandKicker=STUDIO  /  LOCAL MODEL BRIDGE
 english.CleanupGroup=Previous installation
 english.CleanPrevious=Remove previous program files and unrelated leftovers
-english.CleanPreviousHint=Keeps .gateway model settings, API keys, .env and logs. The previous gateway is stopped so its runtime can be replaced safely.
+english.CleanPreviousHint=Keeps .gateway model settings, API keys, .env and logs. Python, LiteLLM, BAT and C# legacy files are removed.
 chinesesimplified.SetupWindowTitle=安装 Codex Chat Gateway Studio
 chinesesimplified.WelcomeHeading=Studio 控制台 · 本机模型桥
-chinesesimplified.WelcomeBody=安装 Tauri 桌面控制台、LiteLLM 运行时与脚本。%n%n• 仅监听 127.0.0.1%n• 密钥只保存在本机%n• 关闭窗口仅到托盘，不停止网关
+chinesesimplified.WelcomeBody=安装 Tauri 桌面控制台与原生 Rust 网关。%n%n• 普通电脑通常不到一秒即可就绪%n• 仅监听 127.0.0.1%n• 密钥只保存在本机
 chinesesimplified.FinishHeading=Studio 已就绪。
 chinesesimplified.FinishBody=打开控制台，添加模型并启动网关。关闭窗口会隐藏到托盘，不会停止网关进程。
 chinesesimplified.ShortcutGroup=快捷方式
@@ -96,7 +99,7 @@ chinesesimplified.SetupRunning=Codex Chat Gateway 正在运行。请从托盘菜
 chinesesimplified.BrandKicker=STUDIO  /  LOCAL MODEL BRIDGE
 chinesesimplified.CleanupGroup=旧版本清理
 chinesesimplified.CleanPrevious=删除以前版本的程序及无关文件
-chinesesimplified.CleanPreviousHint=保留 .gateway 模型配置、API 密钥、.env 和日志。安装时会停止旧网关，以便安全替换运行时。
+chinesesimplified.CleanPreviousHint=保留 .gateway 模型配置、API 密钥、.env 和日志，并移除 Python、LiteLLM、BAT 与 C# 旧版文件。
 
 [Messages]
 english.SetupAppRunningError={cm:SetupRunning}
@@ -108,7 +111,7 @@ Name: "autostart"; Description: "{cm:AutostartShortcut}"; GroupDescription: "{cm
 Name: "cleanprevious"; Description: "{cm:CleanPrevious}"; GroupDescription: "{cm:CleanupGroup}:"; Flags: checkedonce
 
 [InstallDelete]
-; Replace runtime/scripts trees cleanly on upgrade
+; Replace the supported native payload and remove every legacy runtime.
 Type: filesandordirs; Name: "{app}\runtime"
 Type: filesandordirs; Name: "{app}\scripts"
 Type: filesandordirs; Name: "{app}\patches"; Check: ShouldCleanPreviousFiles
@@ -130,6 +133,9 @@ Type: files; Name: "{app}\CodexChatGateway.exe"
 Type: files; Name: "{app}\codex-chat-gateway-desktop.exe"
 Type: files; Name: "{app}\run_gateway.py"
 Type: files; Name: "{app}\config.yaml"
+Type: files; Name: "{app}\gateway_runtime.py"
+Type: files; Name: "{app}\requirements.txt"
+Type: files; Name: "{app}\ccg-native-gateway.exe"
 
 [Files]
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: ".gateway\*,logs\*,*.pyc,__pycache__\*,.env"

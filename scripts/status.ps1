@@ -14,6 +14,6 @@ try {
 } catch {
     Write-Host 'Status: STOPPED'
     Write-Host "Endpoint not reachable: $base"
-    Write-Host 'Run start-gateway.bat to start it.'
+    Write-Host 'Open Codex Chat Gateway Studio to start it.'
     exit 1
 }

@@ -39,7 +39,7 @@ if (-not $outputRoot.StartsWith($projectPrefix, [StringComparison]::OrdinalIgnor
 }
 
 $version = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Trim()
-if ($version -notmatch '^\d+\.\d+\.\d+$') {
+if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
     throw "Invalid VERSION: $version"
 }
 
